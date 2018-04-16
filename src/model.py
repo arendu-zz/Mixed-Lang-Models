@@ -51,13 +51,13 @@ class WordRepresenter(nn.Module):
         sorted_lengths, sort_idx = torch.sort(lengths, 0, True)
         unsort_idx = get_unsort_idx(sort_idx)
         sorted_lengths = sorted_lengths.numpy().tolist()
-        sorted_spellings = Variable(spellings[sort_idx, :])
+        sorted_spellings = spellings[sort_idx, :]
+        sorted_spellings = Variable(sorted_spellings, requires_grad=False)
         return sorted_spellings, sorted_lengths, unsort_idx
 
     def init_cuda(self,):
         self.sorted_spellings = self.sorted_spellings.cuda()
         self.unsort_idx = self.unsort_idx.cuda()
-
 
     def forward(self,):
         emb = self.ce_layer(self.sorted_spellings)
@@ -148,9 +148,9 @@ class CBiLSTM(nn.Module):
 
     def forward(self, batch):
         lengths, data = batch
-        data = Variable(data)
-        if self.is_cuda():
-            data = data.cuda()
+        # data = Variable(data, requires_grad=False)
+        # if self.is_cuda():
+        #     data = data.cuda()
         batch_size = data.size(0)
         # max_seq_len = data.size(1)
         assert data.dim() == 2
@@ -172,7 +172,7 @@ class CBiLSTM(nn.Module):
         loss = self.loss(out.view(-1, self.vocab_size), data.view(-1))
         return loss
 
-    def train(self, batch, freeze=None):
+    def do_backprop(self, batch, freeze=None):
         self.optimizer.zero_grad()
         l = self(batch)
         l.backward()
@@ -191,4 +191,5 @@ class CBiLSTM(nn.Module):
             np_loss = l.data.clone().cpu().numpy()[0]
         else:
             np_loss = l.data.clone().numpy()[0]
+        del l, batch
         return np_loss, grad_norm
