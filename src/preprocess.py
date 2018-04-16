@@ -1,0 +1,98 @@
+# -*- coding: utf-8 -*-
+import os
+import pickle
+import argparse
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data_dir', type=str, help="data directory path, in this folder a corpus.txt file is expected", required=True)
+    parser.add_argument('--max_word_len', type=int, default=20, help='ignore words longer than this')
+    parser.add_argument('--max_vocab', type=int, default=50000, help='only keep most frequent words')
+    return parser.parse_args()
+
+def to_str(lst):
+    return ','.join([str(i) for i in lst])
+
+class Preprocess(object):
+
+    def __init__(self, data_dir):
+        #spl sym for words
+        self.unk = '<UNK>'
+        self.unk_c = '<UNK_C>'
+        self.bos = '<BOS>'
+        self.eos = '<EOS>'
+        #spl sym for chars
+        self.bow = '<BOW>'
+        self.eow = '<EOW>'
+        self.pad = '<PAD>'
+        self.spl_words = set([self.pad, self.bos, self.eos, self.unk])
+        self.data_dir = data_dir
+
+    def build(self, max_word_len=20, max_vocab=50000):
+        filepath = self.data_dir + '/corpus.txt'
+        print("building vocab...", filepath)
+        line_num = 0
+        self.wc = {}
+        total_words = 0
+        with open(filepath, 'r', encoding='utf-8') as file:
+            for line in file:
+                line_num += 1
+                if not line_num % 1000:
+                    print("working on {}kth line".format(line_num // 1000))
+                words = line.strip().split()
+                assert len(words) > 0
+                for word in words:
+                    if len(word) + 2 < max_word_len:
+                        self.wc[word] = self.wc.get(word, 0) + 1
+                        total_words += 1
+                    else:
+                        pass
+        print("")
+        print("total word types", len(self.wc))
+        self.vocab = [self.pad, self.bos, self.eos, self.unk] + sorted(self.wc, key=self.wc.get, reverse=True)[:max_vocab]  # all word types frequency sorted
+        total_count = sum([self.wc.get(v, 0) for v in self.vocab])
+        vocab_info = []
+        c2idx = {self.pad: 0, self.bow: 1, self.eow: 3, self.unk_c: 4}
+        max_vl = 0
+        for v in self.vocab:
+            if v not in self.spl_words:
+                for c in list(v):
+                    if ord(c) < 127:
+                        c2idx[c] = c2idx.get(c, len(c2idx))
+                    else:
+                        c2idx[self.unk_c] = c2idx.get(self.unk_c, len(c2idx))
+            else:
+                c2idx[v] = c2idx.get(v, len(c2idx))
+            vs = [self.bow] + list(v) + [self.eow]
+            cs = [c2idx.get(c, c2idx[self.unk_c]) for c in vs]
+            vl = len(cs)
+            vocab_info.append((vl, v, cs))
+            max_vl = max_vl if max_vl > vl else vl
+
+        #vocab_info = sorted(vocab_info, reverse=True)
+        vidx2spelling = {}
+        vidx2unigram_prob = {}
+        v2idx = {}
+        for v_idx, (vl, v, cs) in enumerate(vocab_info):
+            v2idx[v] = v_idx
+            padder = [0] * (max_vl - vl)
+            vidx2spelling[v_idx] = cs + padder + [vl]
+            vidx2unigram_prob[v_idx] = float(self.wc.get(v, 0)) / total_count
+        idx2c = {idx: c for c, idx in c2idx.items()}
+        idx2v = {idx: v for v, idx in v2idx.items()}
+        print("build done")
+        print("saving files...")
+        pickle.dump(self.vocab, open(os.path.join(self.data_dir, 'vocab.pkl'), 'wb'))
+        pickle.dump(idx2c, open(os.path.join(self.data_dir, 'idx2c.pkl'), 'wb'))
+        pickle.dump(idx2v, open(os.path.join(self.data_dir, 'idx2v.pkl'), 'wb'))
+        pickle.dump(c2idx, open(os.path.join(self.data_dir, 'c2idx.pkl'), 'wb'))
+        pickle.dump(v2idx, open(os.path.join(self.data_dir, 'v2idx.pkl'), 'wb'))
+        pickle.dump(vidx2spelling, open(os.path.join(self.data_dir, 'vidx2spelling.pkl'), 'wb'))
+        pickle.dump(vidx2unigram_prob, open(os.path.join(self.data_dir, 'vidx2unigram_prob.pkl'), 'wb'))
+
+
+if __name__ == '__main__':
+    args = parse_args()
+    preprocess = Preprocess(data_dir=args.data_dir)
+    preprocess.build(max_word_len=args.max_word_len, max_vocab=args.max_vocab)
