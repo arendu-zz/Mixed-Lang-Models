@@ -17,8 +17,6 @@ from utils import my_collate
 
 from torch.autograd import Variable
 
-import pdb
-
 global PAD, EOS, BOS, UNK
 PAD = '<PAD>'
 UNK = '<UNK>'

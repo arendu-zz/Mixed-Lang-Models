@@ -19,7 +19,7 @@ def get_unsort_idx(sort_idx):
 
 class WordRepresenter(nn.Module):
     def __init__(self, word2spelling, char2idx, cv_size, ce_size, cp_idx, cr_size, we_size,
-                 bidirectional=False, dropout=0.3):
+                 bidirectional=False, dropout=0.3, word2feat=None):
         super(WordRepresenter, self).__init__()
         self.word2spelling = word2spelling
         self.sorted_spellings, self.sorted_lengths, self.unsort_idx = self.init_word2spelling()
