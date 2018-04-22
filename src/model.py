@@ -19,24 +19,32 @@ def get_unsort_idx(sort_idx):
 
 class WordRepresenter(nn.Module):
     def __init__(self, word2spelling, char2idx, cv_size, ce_size, cp_idx, cr_size, we_size,
-                 bidirectional=False, dropout=0.3, word2feat=None):
+                 bidirectional=False, dropout=0.3, word2feat=None, use_extra=False):
         super(WordRepresenter, self).__init__()
         self.word2spelling = word2spelling
         self.sorted_spellings, self.sorted_lengths, self.unsort_idx = self.init_word2spelling()
+        self.v_size = len(self.sorted_lengths)
         self.char2idx = char2idx
         self.ce_size = ce_size
         self.cv_size = cv_size
         self.cr_size = cr_size
         self.ce_layer = torch.nn.Embedding(self.cv_size, self.ce_size, padding_idx=cp_idx)
+        self.vocab_idx = Variable(torch.arange(self.v_size).long(), requires_grad=False)
         self.ce_layer.weight = nn.Parameter(
             torch.FloatTensor(self.cv_size, self.ce_size).uniform_(-0.5 / self.ce_size, 0.5 / self.ce_size))
-        self.c_rnn = torch.nn.LSTM(self.ce_size, self.cr_size,
+        self.c_rnn = torch.nn.LSTM(self.ce_size + 1, self.cr_size,
                                    bidirectional=bidirectional, batch_first=True,
                                    dropout=dropout)
         if self.cr_size * (2 if bidirectional else 1) != we_size:
             self.c_proj = torch.nn.Linear(self.cr_size * (2 if bidirectional else 1), we_size)
         else:
             self.c_proj = None
+        self.emb_v_extra_layer = torch.nn.Embedding(self.v_size, 1)
+        self.emb_v_extra_layer.weight = nn.Parameter(torch.ones(self.v_size, 1))
+        if use_extra:
+            self.emb_v_extra_layer.weight.requires_grad = True
+        else:
+            self.emb_v_extra_layer.weight.requires_grad = False
         print('WordRepresenter init complete.')
 
     def init_word2spelling(self,):
@@ -58,9 +66,14 @@ class WordRepresenter(nn.Module):
     def init_cuda(self,):
         self.sorted_spellings = self.sorted_spellings.cuda()
         self.unsort_idx = self.unsort_idx.cuda()
+        self.vocab_idx = self.vocab_idx.cuda()
 
     def forward(self,):
         emb = self.ce_layer(self.sorted_spellings)
+        extra_emb = self.emb_v_extra_layer(self.vocab_idx).unsqueeze(1)
+        print(extra_emb[[10, 100, 1000], :])
+        extra_emb = extra_emb.expand(extra_emb.size(0), emb.size(1), extra_emb.size(2))
+        emb = torch.cat((emb, extra_emb), dim=2)
         packed_emb = pack(emb, self.sorted_lengths, batch_first=True)
         output, (ht, ct) = self.c_rnn(packed_emb, None)
         # output, l = unpack(output)
@@ -134,7 +147,7 @@ class CBiLSTM(nn.Module):
                            batch_first=True,
                            bidirectional=True)
         self.loss = torch.nn.CrossEntropyLoss(ignore_index=0)
-        self.optimizer = torch.optim.Adam(self.parameters())
+        self.optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()))
         self.eos_sym = None
         self.bos_sym = None
         self.z = Variable(torch.zeros(1, 1, self.rnn_size), requires_grad=False)

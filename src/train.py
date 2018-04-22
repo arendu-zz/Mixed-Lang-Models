@@ -53,6 +53,16 @@ if __name__ == '__main__':
     opt.add_argument('--data_dir', action='store', dest='data_folder', required=True)
     opt.add_argument('--train_corpus', action='store', dest='train_corpus', required=True)
     opt.add_argument('--dev_corpus', action='store', dest='dev_corpus', required=False, default=None)
+    opt.add_argument('--v2i', action='store', dest='v2i', required=True,
+                     help='vocab to index pickle obj')
+    opt.add_argument('--v2spell', action='store', dest='v2spell', required=True,
+                     help='vocab to spelling pickle obj')
+    opt.add_argument('--c2i', action='store', dest='c2i', required=True,
+                     help='character (corpus and gloss)  to index pickle obj')
+    opt.add_argument('--gv2i', action='store', dest='gv2i', required=False,
+                     help='gloss vocab to index pickle obj')
+    opt.add_argument('--gv2spell', action='store', dest='gv2spell', required=False,
+                     help='gloss vocab to index pickle obj')
     opt.add_argument('--w_embedding_size', action='store', type=int, dest='w_embedding_size', default=200)
     opt.add_argument('--c_embedding_size', action='store', type=int, dest='c_embedding_size', default=20)
     opt.add_argument('--batch_size', action='store', type=int, dest='batch_size', default=20)
@@ -71,9 +81,9 @@ if __name__ == '__main__':
     else:
         print("using CPU")
 
-    v2i = pickle.load(open(os.path.join(options.data_folder, 'v2idx.pkl'), 'rb'))
-    c2i = pickle.load(open(os.path.join(options.data_folder, 'c2idx.pkl'), 'rb'))
-    v2c = pickle.load(open(os.path.join(options.data_folder, 'vidx2spelling.pkl'), 'rb'))
+    v2i = pickle.load(open(options.v2i, 'rb'))
+    c2i = pickle.load(open(options.c2i, 'rb'))
+    v2c = pickle.load(open(options.v2spell, 'rb'))
     dataset = LazyTextDataset(options.train_corpus, v2i)
     dataloader = DataLoader(dataset, batch_size=options.batch_size, shuffle=True, collate_fn=my_collate)
     if options.dev_corpus is not None:
