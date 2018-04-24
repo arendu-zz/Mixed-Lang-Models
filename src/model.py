@@ -9,8 +9,6 @@ from torch.autograd import Variable
 from torch.nn.utils.rnn import pack_padded_sequence as pack
 from torch.nn.utils.rnn import pad_packed_sequence as unpack
 
-import pdb
-
 
 def get_unsort_idx(sort_idx):
     unsort_idx = torch.zeros_like(sort_idx).long().scatter_(0, sort_idx, torch.arange(sort_idx.size(0)).long())
@@ -71,7 +69,7 @@ class WordRepresenter(nn.Module):
     def forward(self,):
         emb = self.ce_layer(self.sorted_spellings)
         extra_emb = self.emb_v_extra_layer(self.vocab_idx).unsqueeze(1)
-        print(extra_emb[[10, 100, 1000], :])
+        # print(extra_emb[[10, 100, 1000], :])
         extra_emb = extra_emb.expand(extra_emb.size(0), emb.size(1), extra_emb.size(2))
         emb = torch.cat((emb, extra_emb), dim=2)
         packed_emb = pack(emb, self.sorted_lengths, batch_first=True)
@@ -118,7 +116,6 @@ class VarEmbedding(nn.Module):
 
     def lookup(self, data):
         var = self.word_representer()
-        # vocab_size = var.size(0)
         embedding_size = var.size(1)
         if data.dim() == 2:
             batch_size = data.size(0)
@@ -133,20 +130,48 @@ class VarEmbedding(nn.Module):
 
 
 class CBiLSTM(nn.Module):
-    def __init__(self,  rnn_size, input_size, vocab_size, encoder, decoder,
+    L1_LEARNING = 'L1_LEARNING'
+    L2_LEARNING = 'L2_LEARNING'
+
+    def __init__(self, input_size,
+                 encoder, decoder,
+                 g_encoder, g_decoder,
+                 mode,
                  dropout=0.3, max_grad_norm=5.0):
         super(CBiLSTM, self).__init__()
         self.encoder = encoder
         self.decoder = decoder
+        self.g_encoder = g_encoder
+        self.g_decoder = g_decoder
         self.dropout = nn.Dropout(dropout)
         self.max_grad_norm = max_grad_norm
         self.input_size = input_size
-        self.rnn_size = rnn_size  # self.encoder.weight.size(1) // 2
-        self.vocab_size = vocab_size  # self.encoder.weight.size(0)
+        assert self.input_size % 2 == 0
+        self.rnn_size = self.input_size // 2
         self.rnn = nn.LSTM(self.input_size, self.rnn_size, dropout=dropout,
                            batch_first=True,
                            bidirectional=True)
-        self.loss = torch.nn.CrossEntropyLoss(ignore_index=0)
+        self.loss = torch.nn.CrossEntropyLoss(size_average=True, ignore_index=0)
+        self.mode = mode
+        if self.mode == CBiLSTM.L2_LEARNING:
+            assert self.g_encoder is not None
+            assert self.g_decoder is not None
+            for p in self.encoder.parameters():
+                p.requires_grad = False
+            for p in self.decoder.parameters():
+                p.requires_grad = False
+            for p in self.rnn.parameters():
+                p.requires_grad = False
+            print('L2_LEARNING, L1 Parameters frozen')
+        else:
+            assert self.mode == CBiLSTM.L1_LEARNING
+            if self.g_encoder is not None:
+                for p in self.g_encoder.parameters():
+                    p.requires_grad = False
+            if self.g_decoder is not None:
+                for p in self.g_decoder.parameters():
+                    p.requires_grad = False
+            print('L1_LEARNING, L2 Parameters frozen')
         self.optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()))
         self.eos_sym = None
         self.bos_sym = None
@@ -160,7 +185,10 @@ class CBiLSTM(nn.Module):
         return self.rnn.weight_hh_l0.is_cuda
 
     def forward(self, batch):
-        lengths, data = batch
+        lengths, data, ind = batch
+        v_ind = ind % 2
+        g_ind = ind - 1
+        g_ind[g_ind < 0] = 0
         # data = Variable(data, requires_grad=False)
         # if self.is_cuda():
         #     data = data.cuda()
@@ -169,7 +197,16 @@ class CBiLSTM(nn.Module):
         assert data.dim() == 2
 
         # data = (batch_size x seq_len)
-        encoded = self.dropout(self.encoder(data))
+        v_encoded = self.encoder(data)
+        v_inp_ind = v_ind.unsqueeze(2).expand(v_ind.size(0), v_ind.size(1), v_encoded.size(2)).float()
+        if self.mode == CBiLSTM.L2_LEARNING:
+            g_encoded = self.g_encoder(data)
+            g_inp_ind = g_ind.unsqueeze(2).expand(g_ind.size(0), g_ind.size(1), g_encoded.size(2)).float()
+            encoded = v_inp_ind * v_encoded + g_inp_ind * g_encoded
+            encoded = self.dropout(encoded)
+        else:
+            encoded = self.dropout(v_encoded)
+
         packed_encoded = pack(encoded, lengths, batch_first=True)
         # encoded = (batch_size x seq_len x embedding_size)
         packed_hidden, (h_t, c_t) = self.rnn(packed_encoded)
@@ -181,25 +218,44 @@ class CBiLSTM(nn.Module):
         # bwd_hidden = (batch_size x seq_len x rnn_size)
         # fwd_hidden = (batch_size x seq_len x rnn_size)
         final_hidden = torch.cat((fwd_hidden, bwd_hidden), dim=2)
-        out = self.decoder(self.dropout(final_hidden))
-        loss = self.loss(out.view(-1, self.vocab_size), data.view(-1))
+        final_hidden = self.dropout(final_hidden)
+
+        v_out = self.decoder(final_hidden)
+        # v_out = (batch_size, seq_len, v_vocab_size)
+        if self.mode == CBiLSTM.L2_LEARNING:
+            g_out = self.g_decoder(final_hidden)
+        # g_out = (batch_size, seq_len, g_vocab_size)
+
+        # flatten tensors for loss computation
+        data = data.view(-1)
+
+        v_ind = v_ind.view(-1)
+        d_idx = torch.arange(data.size(0)).type_as(data.data).long()
+        v_idx = d_idx[v_ind.data == 1]
+        v_data = data[v_idx]
+        v_out = v_out.view(-1, v_out.size(2))[v_idx, :]
+        loss = self.loss(v_out, v_data)
+
+        if self.mode == CBiLSTM.L2_LEARNING:
+            g_ind = g_ind.view(-1)
+            g_idx = d_idx[g_ind.data == 1]
+            if g_idx.dim() > 0:
+                g_data = data[g_idx]
+                g_out = g_out.view(-1, g_out.size(2))[g_idx, :]
+                loss += self.loss(g_out, g_data)
+
         return loss
 
     def do_backprop(self, batch, freeze=None):
         self.optimizer.zero_grad()
         l = self(batch)
         l.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm(self.parameters(),
+        grad_norm = torch.nn.utils.clip_grad_norm(filter(lambda p: p.requires_grad, self.parameters()),
                                                   self.max_grad_norm)
         if math.isnan(grad_norm):
             print('skipping update grad_norm is nan')
         else:
-            if freeze is None:
-                self.optimizer.step()
-            else:
-                for p in self.rnn.parameters():
-                    p.grad *= 0
-                self.encoder.weight.grad[freeze] *= 0
+            self.optimizer.step()
         if self.is_cuda():
             np_loss = l.data.clone().cpu().numpy()[0]
         else:

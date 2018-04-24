@@ -65,7 +65,7 @@ class Preprocess(object):
             for v in self.vocab:
                 if v not in self.spl_words:
                     for c in list(v):
-                        if ord(c) < 226:
+                        if ord(c) < 256:
                             c2idx[c] = c2idx.get(c, len(c2idx))
                         else:
                             c2idx[self.unk_c] = c2idx.get(self.unk_c, len(c2idx))

@@ -42,7 +42,7 @@ def make_wl_encoder(vocab_size, embedding_size):
 
 
 def make_wl_decoder(vocab_size, embedding_size, encoder=None):
-    decoder = torch.nn.Linear(embedding_size, max_vocab, bias=False)
+    decoder = torch.nn.Linear(embedding_size, vocab_size, bias=False)
     if encoder is not None:
         decoder.weight = encoder.weight
     return decoder
@@ -52,6 +52,7 @@ if __name__ == '__main__':
     # insert options here
     opt.add_argument('--data_dir', action='store', dest='data_folder', required=True)
     opt.add_argument('--train_corpus', action='store', dest='train_corpus', required=True)
+    opt.add_argument('--train_mode', action='store', dest='train_mode', required=True, type=int, choices=set([0, 1]))
     opt.add_argument('--dev_corpus', action='store', dest='dev_corpus', required=False, default=None)
     opt.add_argument('--v2i', action='store', dest='v2i', required=True,
                      help='vocab to index pickle obj')
@@ -59,9 +60,9 @@ if __name__ == '__main__':
                      help='vocab to spelling pickle obj')
     opt.add_argument('--c2i', action='store', dest='c2i', required=True,
                      help='character (corpus and gloss)  to index pickle obj')
-    opt.add_argument('--gv2i', action='store', dest='gv2i', required=False,
+    opt.add_argument('--gv2i', action='store', dest='gv2i', required=False, default=None,
                      help='gloss vocab to index pickle obj')
-    opt.add_argument('--gv2spell', action='store', dest='gv2spell', required=False,
+    opt.add_argument('--gv2spell', action='store', dest='gv2spell', required=False, default=None,
                      help='gloss vocab to index pickle obj')
     opt.add_argument('--w_embedding_size', action='store', type=int, dest='w_embedding_size', default=200)
     opt.add_argument('--c_embedding_size', action='store', type=int, dest='c_embedding_size', default=20)
@@ -69,7 +70,6 @@ if __name__ == '__main__':
     opt.add_argument('--gpuid', action='store', type=int, dest='gpuid', default=-1)
     opt.add_argument('--epochs', action='store', type=int, dest='epochs', default=50)
     opt.add_argument('--c_rnn_size', action='store', type=int, dest='c_rnn_size', default=100)
-    opt.add_argument('--w_rnn_size', action='store', type=int, dest='w_rnn_size', default=100)
     opt.add_argument('--char_based', action='store', type=int, dest='char_based', default=0, choices=set([0, 1]))
     options = opt.parse_args()
     print(options)
@@ -82,27 +82,46 @@ if __name__ == '__main__':
         print("using CPU")
 
     v2i = pickle.load(open(options.v2i, 'rb'))
-    c2i = pickle.load(open(options.c2i, 'rb'))
     v2c = pickle.load(open(options.v2spell, 'rb'))
-    dataset = LazyTextDataset(options.train_corpus, v2i)
+    gv2i = pickle.load(open(options.gv2i, 'rb')) if options.gv2i is not None else None
+    gv2c = pickle.load(open(options.gv2spell, 'rb')) if options.gv2spell is not None else None
+    c2i = pickle.load(open(options.c2i, 'rb'))
+    train_mode = CBiLSTM.L1_LEARNING if options.train_mode == 0 else CBiLSTM.L2_LEARNING
+    dataset = LazyTextDataset(options.train_corpus, v2i, gv2i)
     dataloader = DataLoader(dataset, batch_size=options.batch_size, shuffle=True, collate_fn=my_collate)
     if options.dev_corpus is not None:
         dataset_dev = LazyTextDataset(options.dev_corpus, v2i)
         dataloader_dev = DataLoader(dataset_dev, batch_size=options.batch_size, shuffle=False, collate_fn=my_collate)
     total_batches = int(np.ceil(len(dataset) / options.batch_size))
-    max_vocab = len(v2i)
+    v_max_vocab = len(v2i)
+    g_max_vocab = len(gv2i) if gv2i is not None else 0
+    max_vocab = max(v_max_vocab, g_max_vocab)
     if options.char_based == 0:
         encoder = make_wl_encoder(max_vocab, options.w_embedding_size)
         decoder = make_wl_decoder(max_vocab, options.w_embedding_size, encoder)
-        cbilstm = CBiLSTM(options.w_rnn_size, options.w_embedding_size, max_vocab,
-                          encoder, decoder)
+        if g_max_vocab > 0:
+            g_encoder = make_wl_encoder(max_vocab, options.w_embedding_size)
+            g_decoder = make_wl_decoder(max_vocab, options.w_embedding_size, g_encoder)
+        else:
+            g_encoder = None
+            g_decoder = None
+        cbilstm = CBiLSTM(options.w_embedding_size,
+                          encoder, decoder, g_encoder, g_decoder, mode=train_mode)
     else:
         wr = WordRepresenter(v2c, c2i, len(c2i), options.c_embedding_size,
                              c2i[PAD], options.c_rnn_size, options.w_embedding_size)
         cl_encoder = make_cl_encoder(wr)
         cl_decoder = make_cl_decoder(wr)
-        cbilstm = CBiLSTM(options.w_rnn_size, options.w_embedding_size, max_vocab,
-                          cl_encoder, cl_decoder)
+        if g_max_vocab > 0:
+            g_wr = WordRepresenter(gv2c, c2i, len(c2i), options.c_embedding_size,
+                                   c2i[PAD], options.c_rnn_size, options.w_embedding_size)
+            g_cl_encoder = make_cl_encoder(g_wr)
+            g_cl_decoder = make_cl_decoder(g_wr)
+        else:
+            g_cl_encoder = None
+            g_cl_decoder = None
+        cbilstm = CBiLSTM(options.w_embedding_size,
+                          cl_encoder, cl_decoder, g_cl_encoder, g_cl_decoder, mode=train_mode)
     if options.gpuid > -1:
         cbilstm = cbilstm.cuda()
         cbilstm.init_cuda()
@@ -110,7 +129,6 @@ if __name__ == '__main__':
             wr.init_cuda()
 
     print(cbilstm)
-    freeze = None  # torch.arange(200, max_vocab).long()
     ave_time = 0.
     s = time.time()
     for epoch in range(options.epochs):
@@ -118,12 +136,14 @@ if __name__ == '__main__':
         ave_train_loss = []
         ave_dev_loss = []
         for batch_idx, batch in enumerate(dataloader):
-            l, data = batch
+            l, data, ind = batch
             data = Variable(data, requires_grad=False)
+            ind = Variable(ind, requires_grad=False)
             if cbilstm.is_cuda():
                 data = data.cuda()
-            batch = l, data
-            loss, grad_norm = cbilstm.do_backprop(batch, freeze=freeze)
+                ind = ind.cuda()
+            batch = l, data, ind
+            loss, grad_norm = cbilstm.do_backprop(batch)
             if batch_idx % 10 == 0 and batch_idx > 0:
                 e = time.time()
                 ave_time = (e - s) / 10.
@@ -136,11 +156,13 @@ if __name__ == '__main__':
         if options.dev_corpus is not None:
             cbilstm.eval()
             for batch_idx, batch in enumerate(dataloader_dev):
-                l, data = batch
+                l, data, ind = batch
                 data = Variable(data, requires_grad=False, volatile=True)
+                ind = Variable(ind, requires_grad=False, volatile=True)
                 if cbilstm.is_cuda():
                     data = data.cuda()
-                batch = l, data
+                    ind = ind.cuda()
+                batch = l, data, ind
                 loss = cbilstm(batch)
                 if cbilstm.is_cuda():
                     loss = loss.data.cpu().numpy()[0]
