@@ -17,7 +17,7 @@ def get_unsort_idx(sort_idx):
 
 class WordRepresenter(nn.Module):
     def __init__(self, word2spelling, char2idx, cv_size, ce_size, cp_idx, cr_size, we_size,
-                 bidirectional=False, dropout=0.3, word2feat=None, use_extra=False):
+                 bidirectional=False, dropout=0.3, use_extra_feat=False, num_required_vocab=None):
         super(WordRepresenter, self).__init__()
         self.word2spelling = word2spelling
         self.sorted_spellings, self.sorted_lengths, self.unsort_idx = self.init_word2spelling()
@@ -37,13 +37,17 @@ class WordRepresenter(nn.Module):
             self.c_proj = torch.nn.Linear(self.cr_size * (2 if bidirectional else 1), we_size)
         else:
             self.c_proj = None
+        self.num_required_vocab = num_required_vocab if num_required_vocab is not None else self.v_size
         self.emb_v_extra_layer = torch.nn.Embedding(self.v_size, 1)
         self.emb_v_extra_layer.weight = nn.Parameter(torch.ones(self.v_size, 1))
-        if use_extra:
+        self.init_extra_feat(use_extra_feat)
+        print('WordRepresenter init complete.')
+
+    def init_extra_feat(self, use_extra_feat):
+        if use_extra_feat:
             self.emb_v_extra_layer.weight.requires_grad = True
         else:
             self.emb_v_extra_layer.weight.requires_grad = False
-        print('WordRepresenter init complete.')
 
     def init_word2spelling(self,):
         spellings = None
@@ -62,6 +66,7 @@ class WordRepresenter(nn.Module):
         return sorted_spellings, sorted_lengths, unsort_idx
 
     def init_cuda(self,):
+        self = self.cuda()
         self.sorted_spellings = self.sorted_spellings.cuda()
         self.unsort_idx = self.unsort_idx.cuda()
         self.vocab_idx = self.vocab_idx.cuda()
@@ -86,6 +91,10 @@ class WordRepresenter(nn.Module):
         else:
             word_embeddings = ht
         unsorted_word_embeddings = word_embeddings[self.unsort_idx, :]
+        if self.num_required_vocab > unsorted_word_embeddings.size(0):
+            e = unsorted_word_embeddings[0].unsqueeze(0)
+            e = e.expand(self.num_required_vocab - unsorted_word_embeddings.size(0), e.size(1))
+            unsorted_word_embeddings = torch.cat([unsorted_word_embeddings, e], dim=0)
         return unsorted_word_embeddings
 
 
@@ -151,7 +160,19 @@ class CBiLSTM(nn.Module):
         self.rnn = nn.LSTM(self.input_size, self.rnn_size, dropout=dropout,
                            batch_first=True,
                            bidirectional=True)
+        self.init_param_freeze(mode)
         self.loss = torch.nn.CrossEntropyLoss(size_average=True, ignore_index=0)
+        self.optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()))
+        self.eos_sym = None
+        self.bos_sym = None
+        self.z = Variable(torch.zeros(1, 1, self.rnn_size), requires_grad=False)
+        # .expand(batch_size, 1, self.rnn_size), requires_grad=False)
+
+    def init_cuda(self,):
+        self = self.cuda()
+        self.z = self.z.cuda()
+
+    def init_param_freeze(self, mode):
         self.mode = mode
         if self.mode == CBiLSTM.L2_LEARNING:
             assert self.g_encoder is not None
@@ -163,6 +184,12 @@ class CBiLSTM(nn.Module):
             for p in self.rnn.parameters():
                 p.requires_grad = False
             print('L2_LEARNING, L1 Parameters frozen')
+            if self.g_encoder is not None:
+                for p in self.g_encoder.parameters():
+                    p.requires_grad = True
+            if self.g_decoder is not None:
+                for p in self.g_decoder.parameters():
+                    p.requires_grad = True
         else:
             assert self.mode == CBiLSTM.L1_LEARNING
             if self.g_encoder is not None:
@@ -172,14 +199,12 @@ class CBiLSTM(nn.Module):
                 for p in self.g_decoder.parameters():
                     p.requires_grad = False
             print('L1_LEARNING, L2 Parameters frozen')
-        self.optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()))
-        self.eos_sym = None
-        self.bos_sym = None
-        self.z = Variable(torch.zeros(1, 1, self.rnn_size), requires_grad=False)
-        # .expand(batch_size, 1, self.rnn_size), requires_grad=False)
-
-    def init_cuda(self,):
-        self.z = self.z.cuda()
+            for p in self.encoder.parameters():
+                p.requires_grad = True
+            for p in self.decoder.parameters():
+                p.requires_grad = True
+            for p in self.rnn.parameters():
+                p.requires_grad = True
 
     def is_cuda(self,):
         return self.rnn.weight_hh_l0.is_cuda
@@ -262,3 +287,6 @@ class CBiLSTM(nn.Module):
             np_loss = l.data.clone().numpy()[0]
         del l, batch
         return np_loss, grad_norm
+
+    def save_model(self, path):
+        torch.save(self, path)

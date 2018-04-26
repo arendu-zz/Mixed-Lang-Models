@@ -17,6 +17,8 @@ from utils import my_collate
 
 from torch.autograd import Variable
 
+import pdb
+
 global PAD, EOS, BOS, UNK
 PAD = '<PAD>'
 UNK = '<UNK>'
@@ -34,23 +36,27 @@ def make_cl_decoder(word_representer):
     return d
 
 
-def make_wl_encoder(vocab_size, embedding_size):
+def make_wl_encoder(vocab_size, embedding_size, wt=None):
     e = torch.nn.Embedding(vocab_size, embedding_size)
-    e.weight = torch.nn.Parameter(torch.FloatTensor(vocab_size, embedding_size).uniform_(-0.5 / embedding_size,
-                                                                                         0.5 / embedding_size))
+    if wt is None:
+        e.weight = torch.nn.Parameter(torch.FloatTensor(vocab_size, embedding_size).uniform_(-0.5 / embedding_size,
+                                                                                             0.5 / embedding_size))
+    else:
+        e.weight = torch.nn.Parameter(wt)
     return e
 
 
-def make_wl_decoder(vocab_size, embedding_size, encoder=None):
+def make_wl_decoder(vocab_size, embedding_size, encoder):
     decoder = torch.nn.Linear(embedding_size, vocab_size, bias=False)
-    if encoder is not None:
-        decoder.weight = encoder.weight
+    decoder.weight = encoder.weight
     return decoder
 
 if __name__ == '__main__':
     opt = argparse.ArgumentParser(description="write program description here")
     # insert options here
     opt.add_argument('--data_dir', action='store', dest='data_folder', required=True)
+    opt.add_argument('--save_dir', action='store', dest='save_folder', required=True,
+                     help='folder to save the model after every epoch')
     opt.add_argument('--train_corpus', action='store', dest='train_corpus', required=True)
     opt.add_argument('--train_mode', action='store', dest='train_mode', required=True, type=int, choices=set([0, 1]))
     opt.add_argument('--dev_corpus', action='store', dest='dev_corpus', required=False, default=None)
@@ -71,6 +77,7 @@ if __name__ == '__main__':
     opt.add_argument('--epochs', action='store', type=int, dest='epochs', default=50)
     opt.add_argument('--c_rnn_size', action='store', type=int, dest='c_rnn_size', default=100)
     opt.add_argument('--char_based', action='store', type=int, dest='char_based', default=0, choices=set([0, 1]))
+    opt.add_argument('--trained_model', action='store', dest='trained_model', required=False)
     options = opt.parse_args()
     print(options)
     if options.gpuid > -1:
@@ -87,54 +94,76 @@ if __name__ == '__main__':
     gv2c = pickle.load(open(options.gv2spell, 'rb')) if options.gv2spell is not None else None
     c2i = pickle.load(open(options.c2i, 'rb'))
     train_mode = CBiLSTM.L1_LEARNING if options.train_mode == 0 else CBiLSTM.L2_LEARNING
-    dataset = LazyTextDataset(options.train_corpus, v2i, gv2i)
-    dataloader = DataLoader(dataset, batch_size=options.batch_size, shuffle=True, collate_fn=my_collate)
+    dataset = LazyTextDataset(options.train_corpus, v2i, gv2i, train_mode)
+    dataloader = DataLoader(dataset, batch_size=options.batch_size, shuffle=False, collate_fn=my_collate)
     if options.dev_corpus is not None:
-        dataset_dev = LazyTextDataset(options.dev_corpus, v2i)
+        dataset_dev = LazyTextDataset(options.dev_corpus, v2i, None, CBiLSTM.L1_LEARNING)
         dataloader_dev = DataLoader(dataset_dev, batch_size=options.batch_size, shuffle=False, collate_fn=my_collate)
     total_batches = int(np.ceil(len(dataset) / options.batch_size))
     v_max_vocab = len(v2i)
     g_max_vocab = len(gv2i) if gv2i is not None else 0
     max_vocab = max(v_max_vocab, g_max_vocab)
-    if options.char_based == 0:
-        encoder = make_wl_encoder(max_vocab, options.w_embedding_size)
-        decoder = make_wl_decoder(max_vocab, options.w_embedding_size, encoder)
-        if g_max_vocab > 0:
-            g_encoder = make_wl_encoder(max_vocab, options.w_embedding_size)
-            g_decoder = make_wl_decoder(max_vocab, options.w_embedding_size, g_encoder)
-        else:
-            g_encoder = None
-            g_decoder = None
-        cbilstm = CBiLSTM(options.w_embedding_size,
-                          encoder, decoder, g_encoder, g_decoder, mode=train_mode)
+    if options.trained_model is not None:
+        cbilstm = torch.load(options.trained_model, map_location=lambda storage, loc: storage)
+        pdb.set_trace()
+        if isinstance(cbilstm.encoder, VarEmbedding):
+            wr = cbilstm.encoder.word_representer
+            learned_weights = cbilstm.encoder.word_representer()
+            encoder = make_wl_encoder(max_vocab, options.w_embedding_size, learned_weights.data.clone())
+            decoder = make_wl_decoder(max_vocab, options.w_embedding_size, encoder)
+            wr.init_extra_feat(True)
+            if options.gpuid > -1:
+                wr.init_cuda()
+            g_cl_encoder = make_cl_encoder(wr)
+            g_cl_decoder = make_cl_decoder(wr)
+            cbilstm.encoder = encoder
+            cbilstm.decoder = decoder
+            cbilstm.g_encoder = g_cl_encoder
+            cbilstm.g_decoder = g_cl_decoder
+            cbilstm.init_param_freeze(CBiLSTM.L2_LEARNING)
     else:
-        wr = WordRepresenter(v2c, c2i, len(c2i), options.c_embedding_size,
-                             c2i[PAD], options.c_rnn_size, options.w_embedding_size)
-        cl_encoder = make_cl_encoder(wr)
-        cl_decoder = make_cl_decoder(wr)
-        if g_max_vocab > 0:
-            g_wr = WordRepresenter(gv2c, c2i, len(c2i), options.c_embedding_size,
-                                   c2i[PAD], options.c_rnn_size, options.w_embedding_size)
-            g_cl_encoder = make_cl_encoder(g_wr)
-            g_cl_decoder = make_cl_decoder(g_wr)
+        if options.char_based == 0:
+            encoder = make_wl_encoder(max_vocab, options.w_embedding_size)
+            decoder = make_wl_decoder(max_vocab, options.w_embedding_size, encoder)
+            if g_max_vocab > 0:
+                g_encoder = make_wl_encoder(max_vocab, options.w_embedding_size)
+                g_decoder = make_wl_decoder(max_vocab, options.w_embedding_size, g_encoder)
+            else:
+                g_encoder = None
+                g_decoder = None
+            cbilstm = CBiLSTM(options.w_embedding_size,
+                              encoder, decoder, g_encoder, g_decoder, mode=train_mode)
         else:
-            g_cl_encoder = None
-            g_cl_decoder = None
-        cbilstm = CBiLSTM(options.w_embedding_size,
-                          cl_encoder, cl_decoder, g_cl_encoder, g_cl_decoder, mode=train_mode)
+            wr = WordRepresenter(v2c, c2i, len(c2i), options.c_embedding_size,
+                                 c2i[PAD], options.c_rnn_size, options.w_embedding_size,
+                                 use_extra_feat=False, num_required_vocab=max_vocab)
+            if options.gpuid > -1:
+                wr.init_cuda()
+            cl_encoder = make_cl_encoder(wr)
+            cl_decoder = make_cl_decoder(wr)
+            if g_max_vocab > 0:
+                g_wr = WordRepresenter(gv2c, c2i, len(c2i), options.c_embedding_size,
+                                       c2i[PAD], options.c_rnn_size, options.w_embedding_size,
+                                       use_extra_feat=True, num_required_vocab=max_vocab)
+                if options.gpuid > -1:
+                    g_wr.init_cuda()
+                g_cl_encoder = make_cl_encoder(g_wr)
+                g_cl_decoder = make_cl_decoder(g_wr)
+            else:
+                g_cl_encoder = None
+                g_cl_decoder = None
+            cbilstm = CBiLSTM(options.w_embedding_size,
+                              cl_encoder, cl_decoder, g_cl_encoder, g_cl_decoder, mode=train_mode)
     if options.gpuid > -1:
-        cbilstm = cbilstm.cuda()
         cbilstm.init_cuda()
-        if options.char_based == 1:
-            wr.init_cuda()
 
     print(cbilstm)
     ave_time = 0.
     s = time.time()
     for epoch in range(options.epochs):
         cbilstm.train()
-        ave_train_loss = []
-        ave_dev_loss = []
+        train_losses = []
+        dev_losses = []
         for batch_idx, batch in enumerate(dataloader):
             l, data, ind = batch
             data = Variable(data, requires_grad=False)
@@ -151,8 +180,8 @@ if __name__ == '__main__':
                 print("e{:d} b{:5d}/{:5d} loss:{:7.4f} ave_time:{:7.4f}\r".format(epoch, batch_idx + 1,
                                                                                   total_batches, loss, ave_time))
             else:
-                print("e{:d} b{:5d}/{:5d} loss:{:7.4f}\r".format(epoch, batch_idx + 1, total_batches, loss))
-            ave_train_loss.append(loss)
+                print("e{:d} b{:d}/{:d} loss:{:7.4f}\r".format(epoch, batch_idx + 1, total_batches, loss))
+            train_losses.append(loss)
         if options.dev_corpus is not None:
             cbilstm.eval()
             for batch_idx, batch in enumerate(dataloader_dev):
@@ -168,8 +197,13 @@ if __name__ == '__main__':
                     loss = loss.data.cpu().numpy()[0]
                 else:
                     loss = loss.data.numpy()[0]
-                ave_dev_loss.append(loss)
-            print("Ending e{:d} AveTrainLoss:{:7.4f} AveDevLoss:{:7.4f}\r".format(epoch, np.mean(ave_train_loss),
-                                                                                  np.mean(ave_dev_loss)))
+                dev_losses.append(loss)
+            print("Ending e{:d} AveTrainLoss:{:7.4f} AveDevLoss:{:7.4f}\r".format(epoch, np.mean(train_losses),
+                                                                                  np.mean(dev_losses)))
+            save_name = "e_{:d}_train_loss_{:.4f}_dev_loss_{:.4f}".format(epoch, np.mean(train_losses),
+                                                                          np.mean(dev_losses))
         else:
-            print("Ending e{:d} AveTrainLoss:{:7.4f}\r".format(epoch, np.mean(ave_train_loss)))
+            save_name = "e_{:d}_train_loss_{:.4f}".format(epoch, np.mean(train_losses))
+            print("Ending e{:d} AveTrainLoss:{:7.4f}\r".format(epoch, np.mean(train_losses)))
+        if options.save_folder is not None:
+            cbilstm.save_model(os.path.join(options.save_folder, save_name + '.model'))

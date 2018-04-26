@@ -8,7 +8,7 @@ import torch
 import pdb
 
 from torch.utils.data import Dataset
-
+from model import CBiLSTM
 
 def my_collate(batch):
     # batch is a list of tuples (l, data)
@@ -25,7 +25,7 @@ def my_collate(batch):
 
 
 class LazyTextDataset(Dataset):
-    def __init__(self, corpus_file, v2idx, gv2idx=None):
+    def __init__(self, corpus_file, v2idx, gv2idx, mode):
         self.corpus_file = corpus_file
         self.UNK = '<UNK>'
         self.BOS = '<BOS>'
@@ -33,13 +33,15 @@ class LazyTextDataset(Dataset):
         self.PAD = '<PAD>'
         self.v2idx = v2idx
         self.gv2idx = gv2idx
+        self.mode = mode
         with open(self.corpus_file, "r", encoding="utf-8") as f:
             self._total_data = len(f.readlines()) - 1
 
     def __getitem__(self, idx):
         line = linecache.getline(self.corpus_file, idx + 1)
         line_items = line.split('|||')
-        if len(line_items) == 2 and self.gv2idx is not None:
+        if self.mode == CBiLSTM.L2_LEARNING:
+            assert len(line_items) == 2
             l1_line = line_items[0].strip().split()
             l2_line = line_items[1].strip().split()
             ind = np.random.randint(1, 3, (len(l1_line),)).tolist()
