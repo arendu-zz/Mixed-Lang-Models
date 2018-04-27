@@ -136,7 +136,7 @@ if __name__ == '__main__':
         else:
             wr = WordRepresenter(v2c, c2i, len(c2i), options.c_embedding_size,
                                  c2i[PAD], options.c_rnn_size, options.w_embedding_size,
-                                 use_extra_feat=False, num_required_vocab=max_vocab)
+                                 is_extra_feat_learnable=False, num_required_vocab=max_vocab)
             if options.gpuid > -1:
                 wr.init_cuda()
             cl_encoder = make_cl_encoder(wr)
@@ -144,7 +144,7 @@ if __name__ == '__main__':
             if g_max_vocab > 0:
                 g_wr = WordRepresenter(gv2c, c2i, len(c2i), options.c_embedding_size,
                                        c2i[PAD], options.c_rnn_size, options.w_embedding_size,
-                                       use_extra_feat=True, num_required_vocab=max_vocab)
+                                       is_extra_feat_learnable=True, num_required_vocab=max_vocab)
                 if options.gpuid > -1:
                     g_wr.init_cuda()
                 g_cl_encoder = make_cl_encoder(g_wr)

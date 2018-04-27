@@ -17,7 +17,7 @@ def get_unsort_idx(sort_idx):
 
 class WordRepresenter(nn.Module):
     def __init__(self, word2spelling, char2idx, cv_size, ce_size, cp_idx, cr_size, we_size,
-                 bidirectional=False, dropout=0.3, use_extra_feat=False, num_required_vocab=None):
+                 bidirectional=True, dropout=0.3, is_extra_feat_learnable=False, num_required_vocab=None):
         super(WordRepresenter, self).__init__()
         self.word2spelling = word2spelling
         self.sorted_spellings, self.sorted_lengths, self.unsort_idx = self.init_word2spelling()
@@ -26,25 +26,30 @@ class WordRepresenter(nn.Module):
         self.ce_size = ce_size
         self.cv_size = cv_size
         self.cr_size = cr_size
+        self.bidirectional = bidirectional
+        self.dropout = dropout
         self.ce_layer = torch.nn.Embedding(self.cv_size, self.ce_size, padding_idx=cp_idx)
         self.vocab_idx = Variable(torch.arange(self.v_size).long(), requires_grad=False)
         self.ce_layer.weight = nn.Parameter(
             torch.FloatTensor(self.cv_size, self.ce_size).uniform_(-0.5 / self.ce_size, 0.5 / self.ce_size))
         self.c_rnn = torch.nn.LSTM(self.ce_size + 1, self.cr_size,
                                    bidirectional=bidirectional, batch_first=True,
-                                   dropout=dropout)
+                                   dropout=self.dropout)
         if self.cr_size * (2 if bidirectional else 1) != we_size:
             self.c_proj = torch.nn.Linear(self.cr_size * (2 if bidirectional else 1), we_size)
+            print('using Linear c_proj layer')
         else:
+            print('no Linear c_proj layer')
             self.c_proj = None
         self.num_required_vocab = num_required_vocab if num_required_vocab is not None else self.v_size
         self.emb_v_extra_layer = torch.nn.Embedding(self.v_size, 1)
         self.emb_v_extra_layer.weight = nn.Parameter(torch.ones(self.v_size, 1))
-        self.init_extra_feat(use_extra_feat)
+        self.init_extra_feat(is_extra_feat_learnable)
         print('WordRepresenter init complete.')
 
-    def init_extra_feat(self, use_extra_feat):
-        if use_extra_feat:
+    def init_extra_feat(self, is_extra_feat_learnable):
+        self.is_extra_feat_learnable = is_extra_feat_learnable
+        if is_extra_feat_learnable:
             self.emb_v_extra_layer.weight.requires_grad = True
         else:
             self.emb_v_extra_layer.weight.requires_grad = False
