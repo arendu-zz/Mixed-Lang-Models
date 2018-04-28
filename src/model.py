@@ -17,7 +17,7 @@ def get_unsort_idx(sort_idx):
 
 class WordRepresenter(nn.Module):
     def __init__(self, word2spelling, char2idx, cv_size, ce_size, cp_idx, cr_size, we_size,
-                 bidirectional=True, dropout=0.3, is_extra_feat_learnable=False, num_required_vocab=None):
+                 bidirectional=False, dropout=0.3, is_extra_feat_learnable=False, num_required_vocab=None):
         super(WordRepresenter, self).__init__()
         self.word2spelling = word2spelling
         self.sorted_spellings, self.sorted_lengths, self.unsort_idx = self.init_word2spelling()
@@ -42,17 +42,13 @@ class WordRepresenter(nn.Module):
             print('no Linear c_proj layer')
             self.c_proj = None
         self.num_required_vocab = num_required_vocab if num_required_vocab is not None else self.v_size
-        self.emb_v_extra_layer = torch.nn.Embedding(self.v_size, 1)
-        self.emb_v_extra_layer.weight = nn.Parameter(torch.ones(self.v_size, 1))
-        self.init_extra_feat(is_extra_feat_learnable)
+        self.extra_ce_layer = torch.nn.Embedding(self.v_size, 1)
+        self.extra_ce_layer.weight = nn.Parameter(torch.ones(self.v_size, 1))
         print('WordRepresenter init complete.')
 
-    def init_extra_feat(self, is_extra_feat_learnable):
+    def set_extra_feat_learnable(self, is_extra_feat_learnable):
         self.is_extra_feat_learnable = is_extra_feat_learnable
-        if is_extra_feat_learnable:
-            self.emb_v_extra_layer.weight.requires_grad = True
-        else:
-            self.emb_v_extra_layer.weight.requires_grad = False
+        self.extra_ce_layer.weight.requires_grad = is_extra_feat_learnable
 
     def init_word2spelling(self,):
         spellings = None
@@ -78,7 +74,7 @@ class WordRepresenter(nn.Module):
 
     def forward(self,):
         emb = self.ce_layer(self.sorted_spellings)
-        extra_emb = self.emb_v_extra_layer(self.vocab_idx).unsqueeze(1)
+        extra_emb = self.extra_ce_layer(self.vocab_idx).unsqueeze(1)
         # print(extra_emb[[10, 100, 1000], :])
         extra_emb = extra_emb.expand(extra_emb.size(0), emb.size(1), extra_emb.size(2))
         emb = torch.cat((emb, extra_emb), dim=2)
@@ -189,14 +185,15 @@ class CBiLSTM(nn.Module):
             for p in self.rnn.parameters():
                 p.requires_grad = False
             print('L2_LEARNING, L1 Parameters frozen')
-            if self.g_encoder is not None:
-                for p in self.g_encoder.parameters():
-                    p.requires_grad = True
-            if self.g_decoder is not None:
-                for p in self.g_decoder.parameters():
-                    p.requires_grad = True
-        else:
-            assert self.mode == CBiLSTM.L1_LEARNING
+            for p in self.g_encoder.parameters():
+                p.requires_grad = True
+            for p in self.g_decoder.parameters():
+                p.requires_grad = True
+            if isinstance(self.g_encoder, VarEmbedding):
+                self.g_encoder.word_representer.set_extra_feat_learnable(True)
+                assert isinstance(self.g_decoder, VarLinear)
+                assert self.g_decoder.word_representer.is_extra_feat_learnable
+        elif self.mode == CBiLSTM.L1_LEARNING:
             if self.g_encoder is not None:
                 for p in self.g_encoder.parameters():
                     p.requires_grad = False
@@ -210,6 +207,10 @@ class CBiLSTM(nn.Module):
                 p.requires_grad = True
             for p in self.rnn.parameters():
                 p.requires_grad = True
+            if isinstance(self.encoder, VarEmbedding):
+                self.encoder.word_representer.set_extra_feat_learnable(False)
+                assert isinstance(self.decoder, VarLinear)
+                assert not self.decoder.word_representer.is_extra_feat_learnable
 
     def is_cuda(self,):
         return self.rnn.weight_hh_l0.is_cuda

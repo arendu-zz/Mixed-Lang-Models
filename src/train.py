@@ -77,7 +77,8 @@ if __name__ == '__main__':
     opt.add_argument('--epochs', action='store', type=int, dest='epochs', default=50)
     opt.add_argument('--c_rnn_size', action='store', type=int, dest='c_rnn_size', default=100)
     opt.add_argument('--char_based', action='store', type=int, dest='char_based', default=0, choices=set([0, 1]))
-    opt.add_argument('--trained_model', action='store', dest='trained_model', required=False)
+    opt.add_argument('--char_bidirectional', action='store', type=int, dest='char_bidirectional', default=0,
+                     choices=set([0, 1]))
     options = opt.parse_args()
     print(options)
     if options.gpuid > -1:
@@ -95,7 +96,7 @@ if __name__ == '__main__':
     c2i = pickle.load(open(options.c2i, 'rb'))
     train_mode = CBiLSTM.L1_LEARNING if options.train_mode == 0 else CBiLSTM.L2_LEARNING
     dataset = LazyTextDataset(options.train_corpus, v2i, gv2i, train_mode)
-    dataloader = DataLoader(dataset, batch_size=options.batch_size, shuffle=False, collate_fn=my_collate)
+    dataloader = DataLoader(dataset, batch_size=options.batch_size, shuffle=True, collate_fn=my_collate)
     if options.dev_corpus is not None:
         dataset_dev = LazyTextDataset(options.dev_corpus, v2i, None, CBiLSTM.L1_LEARNING)
         dataloader_dev = DataLoader(dataset_dev, batch_size=options.batch_size, shuffle=False, collate_fn=my_collate)
@@ -103,56 +104,40 @@ if __name__ == '__main__':
     v_max_vocab = len(v2i)
     g_max_vocab = len(gv2i) if gv2i is not None else 0
     max_vocab = max(v_max_vocab, g_max_vocab)
-    if options.trained_model is not None:
-        cbilstm = torch.load(options.trained_model, map_location=lambda storage, loc: storage)
-        pdb.set_trace()
-        if isinstance(cbilstm.encoder, VarEmbedding):
-            wr = cbilstm.encoder.word_representer
-            learned_weights = cbilstm.encoder.word_representer()
-            encoder = make_wl_encoder(max_vocab, options.w_embedding_size, learned_weights.data.clone())
-            decoder = make_wl_decoder(max_vocab, options.w_embedding_size, encoder)
-            wr.init_extra_feat(True)
-            if options.gpuid > -1:
-                wr.init_cuda()
-            g_cl_encoder = make_cl_encoder(wr)
-            g_cl_decoder = make_cl_decoder(wr)
-            cbilstm.encoder = encoder
-            cbilstm.decoder = decoder
-            cbilstm.g_encoder = g_cl_encoder
-            cbilstm.g_decoder = g_cl_decoder
-            cbilstm.init_param_freeze(CBiLSTM.L2_LEARNING)
-    else:
-        if options.char_based == 0:
-            encoder = make_wl_encoder(max_vocab, options.w_embedding_size)
-            decoder = make_wl_decoder(max_vocab, options.w_embedding_size, encoder)
-            if g_max_vocab > 0:
-                g_encoder = make_wl_encoder(max_vocab, options.w_embedding_size)
-                g_decoder = make_wl_decoder(max_vocab, options.w_embedding_size, g_encoder)
-            else:
-                g_encoder = None
-                g_decoder = None
-            cbilstm = CBiLSTM(options.w_embedding_size,
-                              encoder, decoder, g_encoder, g_decoder, mode=train_mode)
+    if options.char_based == 0:
+        encoder = make_wl_encoder(max_vocab, options.w_embedding_size)
+        decoder = make_wl_decoder(max_vocab, options.w_embedding_size, encoder)
+        if train_mode == CBiLSTM.L2_LEARNING:
+            g_encoder = make_wl_encoder(max_vocab, options.w_embedding_size)
+            g_decoder = make_wl_decoder(max_vocab, options.w_embedding_size, g_encoder)
         else:
-            wr = WordRepresenter(v2c, c2i, len(c2i), options.c_embedding_size,
-                                 c2i[PAD], options.c_rnn_size, options.w_embedding_size,
-                                 is_extra_feat_learnable=False, num_required_vocab=max_vocab)
+            g_encoder = None
+            g_decoder = None
+        cbilstm = CBiLSTM(options.w_embedding_size,
+                          encoder, decoder, g_encoder, g_decoder, mode=train_mode)
+    else:
+        wr = WordRepresenter(v2c, c2i, len(c2i), options.c_embedding_size,
+                             c2i[PAD], options.c_rnn_size, options.w_embedding_size,
+                             bidirectional=options.char_bidirectional == 1,
+                             is_extra_feat_learnable=False, num_required_vocab=max_vocab)
+        if options.gpuid > -1:
+            wr.init_cuda()
+        cl_encoder = make_cl_encoder(wr)
+        cl_decoder = make_cl_decoder(wr)
+        if train_mode == CBiLSTM.L2_LEARNING:
+            assert gv2c is not None
+            g_wr = WordRepresenter(gv2c, c2i, len(c2i), options.c_embedding_size,
+                                   c2i[PAD], options.c_rnn_size, options.w_embedding_size,
+                                   bidirectional=options.char_bidirectional == 1,
+                                   is_extra_feat_learnable=True, num_required_vocab=max_vocab)
             if options.gpuid > -1:
-                wr.init_cuda()
-            cl_encoder = make_cl_encoder(wr)
-            cl_decoder = make_cl_decoder(wr)
-            if g_max_vocab > 0:
-                g_wr = WordRepresenter(gv2c, c2i, len(c2i), options.c_embedding_size,
-                                       c2i[PAD], options.c_rnn_size, options.w_embedding_size,
-                                       is_extra_feat_learnable=True, num_required_vocab=max_vocab)
-                if options.gpuid > -1:
-                    g_wr.init_cuda()
-                g_cl_encoder = make_cl_encoder(g_wr)
-                g_cl_decoder = make_cl_decoder(g_wr)
-            else:
-                g_cl_encoder = None
-                g_cl_decoder = None
-            cbilstm = CBiLSTM(options.w_embedding_size,
+                g_wr.init_cuda()
+            g_cl_encoder = make_cl_encoder(g_wr)
+            g_cl_decoder = make_cl_decoder(g_wr)
+        else:
+            g_cl_encoder = None
+            g_cl_decoder = None
+        cbilstm = CBiLSTM(options.w_embedding_size,
                               cl_encoder, cl_decoder, g_cl_encoder, g_cl_decoder, mode=train_mode)
     if options.gpuid > -1:
         cbilstm.init_cuda()
