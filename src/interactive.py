@@ -27,6 +27,63 @@ BOS = '<BOS>'
 EOS = '<EOS>'
 
 
+def apply_swap(swap_ind, batch, l1_key, l2_key, model):
+    lens, l1_data, l2_data = batch
+    indicator = torch.LongTensor([1] * lens[0]).unsqueeze(0)
+    swap_index = torch.LongTensor([int(i) for i in swap_ind.strip().split(',')])
+    indicator[:, swap_index] = 2
+    flip_l1 = l1_data[indicator == 2]  # .numpy().tolist()
+    flip_l2 = l2_data[indicator == 2]  # .numpy().tolist()
+    flip_set = set([(i, j) for i, j in zip(flip_l1.numpy().tolist(), flip_l2.numpy().tolist())])
+    flip_l2_set, flip_l2_offset = torch.unique(flip_l2, sorted=True, return_inverse=True)
+    flip_l2_set = flip_l2_set.long()
+    flip_l2_offset = flip_l2_offset.long()
+
+    # for reward_computation
+    flip_l1_key, flip_l2_key = zip(*flip_set)
+    flip_l1_key = torch.Tensor(list(flip_l1_key)).long()
+    flip_l2_key = torch.Tensor(list(flip_l2_key)).long()
+
+    l1_d = l1_data.clone()
+    l2_d = l2_data.clone()
+    l1_d[indicator == 2] = l2_d[indicator == 2]
+    swap_str = ' '.join([(i2v[i.item()]
+                         if indicator[0, _idx] == 1 else (text_effect.UNDERLINE + i2gv[i.item()] + text_effect.END))
+                         for _idx, i in enumerate(l1_d[0, :])][1:-1])
+    print(swap_str)
+    data = l1_d
+    if model.is_cuda():
+        data = data.cuda()
+        indicator = indicator.cuda()
+        flip_l2 = flip_l2.cuda()
+        flip_l2_offset = flip_l2_offset.cuda()
+        flip_l2_set = flip_l2_set.cuda()
+
+        flip_l1_key = flip_l1_key.cuda()
+        flip_l2_key = flip_l2_key.cuda()
+
+        l1_key = l1_key.cuda()
+        l2_key = l2_key.cuda()
+
+    var_batch = lens, data, indicator
+    model.init_optimizer(type='SGD')
+    init_score_vocabtype = model.score_embeddings(l2_key, l1_key)
+    print('init score', init_score_vocabtype)
+    prev_step_score_vocabtype = init_score_vocabtype
+    improvement = 0.01
+    num_steps = 0
+    while improvement >= 0.01 and num_steps < 500:
+        loss, grad_norm = model.do_backprop(var_batch, seen=(flip_l2, flip_l2_offset, flip_l2_set))
+        step_score_vocabtype = model.score_embeddings(l2_key, l1_key)
+        improvement = step_score_vocabtype - prev_step_score_vocabtype
+        prev_step_score_vocabtype = step_score_vocabtype
+        num_steps += 1
+        print(num_steps, 'step score', step_score_vocabtype)
+    step_score_vocabtype = model.score_embeddings(l2_key, l1_key)
+    print('final score', step_score_vocabtype)
+    return step_score_vocabtype, model
+
+
 if __name__ == '__main__':
     print(sys.stdout.encoding)
     torch.manual_seed(1234)
@@ -128,89 +185,18 @@ if __name__ == '__main__':
         old = cbilstm.encoder.weight.clone()
         old_g = cbilstm.g_encoder.weight.clone()
         lens, l1_data, l2_data = batch
-        l1_l2_pairs = set([(i, j) for i, j in
-                          zip(l1_data[0].numpy().tolist()[1:-1], l2_data[0].numpy().tolist()[1:-1])])
-        l1_sentence_set, l2_sentence_set = zip(* l1_l2_pairs)
-        l1_sentence_set = torch.LongTensor(list(l1_sentence_set))
-        l2_sentence_set = torch.LongTensor(list(l2_sentence_set))
         go_next = False
         tt = []
         while not go_next:
-            indicator = torch.LongTensor([1] * lens[0]).unsqueeze(0)
             l1_str = ' '.join([str(_idx) + ':' + i2v[i.item()] for _idx, i in enumerate(l1_data[0, :])][1:-1])
             print('\n' + l1_str)
-            _swap_ind = input('swqp (1,' + str(lens[0]-2) + '): ')
-            swap_index = torch.LongTensor([int(i) for i in _swap_ind.strip().split(',')])
-            indicator[:, swap_index] = 2
-            flip_l1 = l1_data[indicator == 2]  # .numpy().tolist()
-            flip_l2 = l2_data[indicator == 2]  # .numpy().tolist()
-            flip_set = set([(i, j) for i, j in zip(flip_l1.numpy().tolist(), flip_l2.numpy().tolist())])
-            flip_l2_set, flip_l2_offset = torch.unique(flip_l2, sorted=True, return_inverse=True)
-            flip_l2_set = flip_l2_set.long()
-            flip_l2_offset = flip_l2_offset.long()
-
-            # for reward_computation
-            flip_l1_key, flip_l2_key = zip(*flip_set)
-            flip_l1_key = torch.Tensor(list(flip_l1_key)).long()
-            flip_l2_key = torch.Tensor(list(flip_l2_key)).long()
-
-            l1_d = l1_data.clone()
-            l2_d = l2_data.clone()
-            l1_d[indicator == 2] = l2_d[indicator == 2]
-            swap_str = ' '.join([(i2v[i.item()] if indicator[0, _idx] == 1 else (text_effect.UNDERLINE + i2gv[i.item()] + text_effect.END))
-                                 for _idx, i in enumerate(l1_d[0, :])][1:-1])
-            print(swap_str)
-            data = l1_d
-            if cbilstm.is_cuda():
-                data = data.cuda()
-                indicator = indicator.cuda()
-                flip_l2 = flip_l2.cuda()
-                flip_l2_offset = flip_l2_offset.cuda()
-                flip_l2_set = flip_l2_set.cuda()
-
-                flip_l1_key = flip_l1_key.cuda()
-                flip_l2_key = flip_l2_key.cuda()
-
-                l1_key = l1_key.cuda()
-                l2_key = l2_key.cuda()
-
-            var_batch = lens, data, indicator
-            cbilstm.init_optimizer(type='SGD')
-            #init_score_token = cbilstm.score_embeddings(flip_l2, flip_l1)
-            #init_score_type = cbilstm.score_embeddings(flip_l2_key, flip_l1_key)
-            init_score_vocabtype = cbilstm.score_embeddings(l2_key, l1_key)
-            print('init score', init_score_vocabtype)
-            #init_seen_embs = cbilstm.g_decoder.weight[flip_l2_set, :]
-            #init_other_embs = cbilstm.g_decoder.weight[[0, 10, 100, 1000], :]
-            #print('all flips', flip_l2.shape, flip_l1.shape)
-            #print('init score (flip tokens)', init_score_token, '(flip type)', init_score_type, '(vocab type)', init_score_vocabtype)
-            prev_step_score_vocabtype = init_score_vocabtype
-            improvement = 0.01
-            #for _ in range(options.steps):
-            num_steps = 0
-            while improvement >= 0.01 and num_steps < 500:
-                loss, grad_norm = cbilstm.do_backprop(var_batch, seen=(flip_l2, flip_l2_offset, flip_l2_set))
-                step_score_vocabtype = cbilstm.score_embeddings(l2_key, l1_key)
-                improvement = step_score_vocabtype - prev_step_score_vocabtype
-                prev_step_score_vocabtype = step_score_vocabtype
-                num_steps += 1
-                print(num_steps, 'step score', step_score_vocabtype)
-            #step_score_token = cbilstm.score_embeddings(flip_l2, flip_l1)
-            #step_score_type = cbilstm.score_embeddings(flip_l2_key, flip_l1_key)
-            step_score_vocabtype = cbilstm.score_embeddings(l2_key, l1_key)
-            print('final score', step_score_vocabtype)
-            #step_seen_embs = cbilstm.g_decoder.weight[flip_l2_set, :]
-            #step_other_embs = cbilstm.g_decoder.weight[[0, 10, 100, 1000], :]
-            #print('step scores (flip tokens)', step_score_token, '(flip type)', step_score_type, '(vocab type)', step_score_vocabtype)
-            tt.append((step_score_vocabtype, swap_str))
-            new = cbilstm.encoder.weight.clone()
-            new_g = cbilstm.g_encoder.weight.clone()
+            swap_ind = input('swqp (1,' + str(lens[0]-2) + '): ')
+            swap_score, cbilstm = apply_swap(swap_ind, batch, l1_key, l2_key, cbilstm)
             go_next = input('next line or retry (n/r):')
             go_next = go_next == 'n'
             if go_next:
                 pass
             else:
-                # reset
                 g_wl_encoder = make_wl_encoder(max_vocab, we_size, old_g.data.clone())
                 g_wl_decoder = make_wl_decoder(max_vocab, we_size, g_wl_encoder)
                 cbilstm.g_encoder = g_wl_encoder
