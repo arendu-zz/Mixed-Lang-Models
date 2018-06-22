@@ -3,6 +3,8 @@ import os
 import pickle
 import argparse
 
+import pdb
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -98,6 +100,22 @@ class Preprocess(object):
 
         pickle.dump(idx2c, open(os.path.join(data_dir, 'idx2c.pkl'), 'wb'))
         pickle.dump(c2idx, open(os.path.join(data_dir, 'c2idx.pkl'), 'wb'))
+
+        # making key
+        key = set([])
+        v2idx = pickle.load(open(os.path.join(data_dir, 'corpus' + '.v2idx.pkl'), 'rb'))
+        gv2idx = pickle.load(open(os.path.join(data_dir, 'gloss' + '.v2idx.pkl'), 'rb'))
+        c_file = open(corpus_file, 'r', encoding='utf-8').readlines()
+        g_file = open(gloss_file, 'r', encoding='utf-8').readlines()
+        for c_line, g_line in zip(c_file, g_file):
+            c_words = c_line.strip().split()
+            g_words = g_line.strip().split()
+            assert len(c_words) == len(g_words)
+            for c, g in zip(c_words, g_words):
+                if c in v2idx and g in gv2idx:
+                    key.add((gv2idx[g], v2idx[c]))
+
+        pickle.dump(key, open(os.path.join(data_dir, 'key.pkl'), 'wb'))
 
 
 if __name__ == '__main__':

@@ -20,6 +20,7 @@ from utils import my_collate
 
 from torch.autograd import Variable
 
+import pdb
 
 global PAD, EOS, BOS, UNK
 PAD = '<PAD>'
@@ -47,7 +48,7 @@ if __name__ == '__main__':
                      help='gloss vocab to index pickle obj')
     opt.add_argument('--batch_size', action='store', type=int, dest='batch_size', default=20)
     opt.add_argument('--gpuid', action='store', type=int, dest='gpuid', default=-1)
-    opt.add_argument('--char_based', action='store', type=int, dest='char_based', default=0, choices=set([0, 1]))
+    opt.add_argument('--swap_prob', action='store', type=float, dest='swap_prob', default=0.25)
     opt.add_argument('--trained_model', action='store', dest='trained_model', required=True)
     opt.add_argument('--epochs', action='store', type=int, dest='epochs', default=100)
     options = opt.parse_args()
@@ -75,7 +76,7 @@ if __name__ == '__main__':
     cbilstm = torch.load(options.trained_model, map_location=lambda storage, loc: storage)
     if isinstance(cbilstm.encoder, VarEmbedding):
         wr = cbilstm.encoder.word_representer
-        we_size = 200  # wr.we_size
+        we_size = wr.we_size
         learned_weights = cbilstm.encoder.word_representer()
         g_wr = WordRepresenter(gv2c, c2i, len(c2i), wr.ce_size,
                                c2i[PAD], wr.cr_size, we_size,
@@ -100,9 +101,15 @@ if __name__ == '__main__':
         cbilstm.g_decoder = g_cl_decoder
         cbilstm.init_param_freeze(CBiLSTM.L2_LEARNING)
     else:
-        learned_weights = cbilstm.encoder.weight
-        g_wl_encoder = make_wl_encoder(max_vocab, options.w_embedding_size)
-        g_wl_decoder = make_wl_decoder(max_vocab, options.w_embedding_size, g_wl_encoder)
+        learned_weights = cbilstm.encoder.weight.data.clone()
+        we_size = cbilstm.encoder.weight.size(1)
+        max_vocab = cbilstm.encoder.weight.size(0)
+        encoder = make_wl_encoder(max_vocab, we_size, learned_weights)
+        decoder = make_wl_decoder(max_vocab, we_size, encoder)
+        g_wl_encoder = make_wl_encoder(max_vocab, we_size)
+        g_wl_decoder = make_wl_decoder(max_vocab, we_size, g_wl_encoder)
+        cbilstm.encoder = encoder
+        cbilstm.decoder = decoder
         cbilstm.g_encoder = g_wl_encoder
         cbilstm.g_decoder = g_wl_decoder
         cbilstm.init_param_freeze(CBiLSTM.L2_LEARNING)
@@ -116,13 +123,13 @@ if __name__ == '__main__':
         cbilstm.train()
         train_losses = []
         for batch_idx, batch in enumerate(dataloader):
-            l, data, ind = batch
+            lens, data, ind = batch
             data = Variable(data, requires_grad=False)
             ind = Variable(ind, requires_grad=False)
             if cbilstm.is_cuda():
                 data = data.cuda()
                 ind = ind.cuda()
-            batch = l, data, ind
+            batch = lens, data, ind
             loss, grad_norm = cbilstm.do_backprop(batch)
             if batch_idx % 10 == 0 and batch_idx > 0:
                 e = time.time()

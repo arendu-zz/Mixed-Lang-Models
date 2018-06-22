@@ -17,8 +17,6 @@ from utils import my_collate
 
 from torch.autograd import Variable
 
-import pdb
-
 global PAD, EOS, BOS, UNK
 PAD = '<PAD>'
 UNK = '<UNK>'
@@ -39,8 +37,8 @@ def make_cl_decoder(word_representer):
 def make_wl_encoder(vocab_size, embedding_size, wt=None):
     e = torch.nn.Embedding(vocab_size, embedding_size)
     if wt is None:
-        e.weight = torch.nn.Parameter(torch.FloatTensor(vocab_size, embedding_size).uniform_(-0.5 / embedding_size,
-                                                                                             0.5 / embedding_size))
+        e.weight = torch.nn.Parameter(torch.FloatTensor(vocab_size, embedding_size).uniform_(-0.01 / embedding_size,
+                                                                                             0.01 / embedding_size))
     else:
         e.weight = torch.nn.Parameter(wt)
     return e
@@ -52,6 +50,7 @@ def make_wl_decoder(vocab_size, embedding_size, encoder):
     return decoder
 
 if __name__ == '__main__':
+    torch.manual_seed(1234)
     opt = argparse.ArgumentParser(description="write program description here")
     # insert options here
     opt.add_argument('--data_dir', action='store', dest='data_folder', required=True)
@@ -75,8 +74,9 @@ if __name__ == '__main__':
     opt.add_argument('--batch_size', action='store', type=int, dest='batch_size', default=20)
     opt.add_argument('--gpuid', action='store', type=int, dest='gpuid', default=-1)
     opt.add_argument('--epochs', action='store', type=int, dest='epochs', default=50)
-    opt.add_argument('--c_rnn_size', action='store', type=int, dest='c_rnn_size', default=100)
     opt.add_argument('--char_based', action='store', type=int, dest='char_based', default=0, choices=set([0, 1]))
+    opt.add_argument('--char_composition', action='store', type=str,
+                     dest='char_composition', default='RNN', choices=set(['RNN', 'CNN']))
     opt.add_argument('--char_bidirectional', action='store', type=int, dest='char_bidirectional', default=0,
                      choices=set([0, 1]))
     options = opt.parse_args()
@@ -117,9 +117,10 @@ if __name__ == '__main__':
                           encoder, decoder, g_encoder, g_decoder, mode=train_mode)
     else:
         wr = WordRepresenter(v2c, c2i, len(c2i), options.c_embedding_size,
-                             c2i[PAD], options.c_rnn_size, options.w_embedding_size,
+                             c2i[PAD], options.w_embedding_size // (2 if options.char_bidirectional else 1), options.w_embedding_size,
                              bidirectional=options.char_bidirectional == 1,
-                             is_extra_feat_learnable=False, num_required_vocab=max_vocab)
+                             is_extra_feat_learnable=False, num_required_vocab=max_vocab,
+                             char_composition=options.char_composition)
         if options.gpuid > -1:
             wr.init_cuda()
         cl_encoder = make_cl_encoder(wr)
@@ -127,9 +128,10 @@ if __name__ == '__main__':
         if train_mode == CBiLSTM.L2_LEARNING:
             assert gv2c is not None
             g_wr = WordRepresenter(gv2c, c2i, len(c2i), options.c_embedding_size,
-                                   c2i[PAD], options.c_rnn_size, options.w_embedding_size,
+                                   c2i[PAD], options.w_embedding_size // (2 if options.char_bidirectional else 1), options.w_embedding_size,
                                    bidirectional=options.char_bidirectional == 1,
-                                   is_extra_feat_learnable=True, num_required_vocab=max_vocab)
+                                   is_extra_feat_learnable=True, num_required_vocab=max_vocab,
+                                   char_composition=options.char_composition)
             if options.gpuid > -1:
                 g_wr.init_cuda()
             g_cl_encoder = make_cl_encoder(g_wr)
@@ -138,7 +140,7 @@ if __name__ == '__main__':
             g_cl_encoder = None
             g_cl_decoder = None
         cbilstm = CBiLSTM(options.w_embedding_size,
-                              cl_encoder, cl_decoder, g_cl_encoder, g_cl_decoder, mode=train_mode)
+                          cl_encoder, cl_decoder, g_cl_encoder, g_cl_decoder, mode=train_mode)
     if options.gpuid > -1:
         cbilstm.init_cuda()
 
@@ -179,9 +181,9 @@ if __name__ == '__main__':
                 batch = l, data, ind
                 loss = cbilstm(batch)
                 if cbilstm.is_cuda():
-                    loss = loss.data.cpu().numpy()[0]
+                    loss = loss.item()  # .data.cpu().numpy()[0]
                 else:
-                    loss = loss.data.numpy()[0]
+                    loss = loss.item()  # .data.numpy()[0]
                 dev_losses.append(loss)
             print("Ending e{:d} AveTrainLoss:{:7.4f} AveDevLoss:{:7.4f}\r".format(epoch, np.mean(train_losses),
                                                                                   np.mean(dev_losses)))

@@ -2,13 +2,25 @@
 __author__ = 'arenduchintala'
 import linecache
 import numpy as np
-import pickle
 import torch
 
-import pdb
-
 from torch.utils.data import Dataset
+
 from model import CBiLSTM
+
+
+class text_effect:
+    PURPLE = '\033[95m'
+    CYAN = '\033[96m'
+    DARKCYAN = '\033[36m'
+    BLUE = '\033[94m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+    END = '\033[0m'
+
 
 def my_collate(batch):
     # batch is a list of tuples (l, data)
@@ -24,8 +36,51 @@ def my_collate(batch):
     return l, torch_d, torch_i
 
 
+def parallel_collate(batch):
+    # batch is a list of tuples (l, data)
+    batch = sorted(batch, reverse=True)
+    l, l1_d, l2_d = zip(*batch)
+    l = list(l)
+    max_len = l[0]
+    torch_l1_d = torch.zeros(len(batch), max_len).long()
+    torch_l2_d = torch.zeros(len(batch), max_len).long()
+    for _idx in range(len(l)):
+        torch_l1_d[_idx, :l[_idx]] = torch.LongTensor(l1_d[_idx])
+        torch_l2_d[_idx, :l[_idx]] = torch.LongTensor(l2_d[_idx])
+    return l, torch_l1_d, torch_l2_d
+
+
+class ParallelTextDataset(Dataset):
+    def __init__(self, corpus_file, v2idx, gv2idx):
+        self.corpus_file = corpus_file
+        self.UNK = '<UNK>'
+        self.BOS = '<BOS>'
+        self.EOS = '<EOS>'
+        self.PAD = '<PAD>'
+        self.v2idx = v2idx
+        self.gv2idx = gv2idx
+        with open(self.corpus_file, "r", encoding="utf-8") as f:
+            self._total_data = len(f.readlines()) - 1
+
+    def __getitem__(self, idx):
+        line = linecache.getline(self.corpus_file, idx + 1)
+        line_items = line.split('|||')
+        l1_line = line_items[0].strip().split()
+        l2_line = line_items[1].strip().split()
+        l1_data = [self.v2idx[self.BOS]] + \
+                  [self.v2idx.get(w, self.v2idx[self.UNK]) for w in l1_line] + \
+                  [self.v2idx[self.EOS]]
+        l2_data = [self.v2idx[self.BOS]] + \
+                  [self.gv2idx.get(w, self.gv2idx[self.UNK]) for w in l2_line] + \
+                  [self.v2idx[self.EOS]]
+        return (len(l1_data), l1_data, l2_data)
+
+    def __len__(self):
+        return self._total_data
+
+
 class LazyTextDataset(Dataset):
-    def __init__(self, corpus_file, v2idx, gv2idx, mode):
+    def __init__(self, corpus_file, v2idx, gv2idx, mode, swap_prob=0.25):
         self.corpus_file = corpus_file
         self.UNK = '<UNK>'
         self.BOS = '<BOS>'
@@ -34,6 +89,7 @@ class LazyTextDataset(Dataset):
         self.v2idx = v2idx
         self.gv2idx = gv2idx
         self.mode = mode
+        self.threshold = 1.0 - swap_prob
         with open(self.corpus_file, "r", encoding="utf-8") as f:
             self._total_data = len(f.readlines()) - 1
 
@@ -44,13 +100,17 @@ class LazyTextDataset(Dataset):
             assert len(line_items) == 2
             l1_line = line_items[0].strip().split()
             l2_line = line_items[1].strip().split()
-            ind = np.random.randint(1, 3, (len(l1_line),)).tolist()
+            ind = np.random.rand(len(l1_line),)
+            ind[ind >= self.threshold] = 2
+            ind[ind < self.threshold] = 1
+            ind = ind.astype(int).tolist()
         else:
             l1_line = line_items[0].strip().split()
             l2_line = [None] * len(l1_line)
             ind = [1] * len(l1_line)
         data = [self.v2idx[self.BOS]] + \
-               [self.v2idx.get(w, self.v2idx[self.UNK]) if i == 1 else self.gv2idx.get(g, self.gv2idx[self.UNK]) for w, g, i in zip(l1_line, l2_line, ind)] +\
+               [self.v2idx.get(w, self.v2idx[self.UNK]) if i == 1 else self.gv2idx.get(g, self.gv2idx[self.UNK])
+                for w, g, i in zip(l1_line, l2_line, ind)] + \
                [self.v2idx[self.EOS]]
         ind = [1] + ind + [1]
         return (len(data), data, ind)
