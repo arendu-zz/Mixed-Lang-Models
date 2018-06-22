@@ -60,7 +60,7 @@ class ParallelTextDataset(Dataset):
         self.v2idx = v2idx
         self.gv2idx = gv2idx
         with open(self.corpus_file, "r", encoding="utf-8") as f:
-            self._total_data = len(f.readlines()) - 1
+            self._total_data = len(f.readlines())
 
     def __getitem__(self, idx):
         line = linecache.getline(self.corpus_file, idx + 1)

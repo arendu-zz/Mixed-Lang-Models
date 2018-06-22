@@ -132,7 +132,7 @@ if __name__ == '__main__':
     train_mode = CBiLSTM.L2_LEARNING
     dataset = ParallelTextDataset(options.train_corpus, v2i, gv2i)
     dataloader = DataLoader(dataset, batch_size=options.batch_size,  shuffle=False, collate_fn=parallel_collate)
-    total_batches = int(np.ceil(len(dataset) / options.batch_size))
+    total_batches = len(dataset)
     v_max_vocab = len(v2i)
     g_max_vocab = len(gv2i) if gv2i is not None else 0
     max_vocab = max(v_max_vocab, g_max_vocab)
