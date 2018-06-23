@@ -248,7 +248,7 @@ class CBiLSTM(nn.Module):
                 p.requires_grad = False
             for p in self.rnn.parameters():
                 p.requires_grad = False
-            print('L2_LEARNING, L1 Parameters frozen')
+            #print(self.mode, 'L1 Parameters frozen')
             for p in self.g_encoder.parameters():
                 p.requires_grad = True
             for p in self.g_decoder.parameters():

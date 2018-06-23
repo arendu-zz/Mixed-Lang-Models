@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 import argparse
-import numpy as np
 import pickle
 import sys
 import torch
@@ -8,6 +7,7 @@ import torch
 from model import CBiLSTM
 from model import VarEmbedding
 from model import WordRepresenter
+from search import apply_swap
 from torch.utils.data import DataLoader
 from train import make_cl_decoder
 from train import make_cl_encoder
@@ -25,64 +25,6 @@ PAD = '<PAD>'
 UNK = '<UNK>'
 BOS = '<BOS>'
 EOS = '<EOS>'
-
-
-def apply_swap(swap_ind, batch, l1_key, l2_key, model):
-    lens, l1_data, l2_data = batch
-    indicator = torch.LongTensor([1] * lens[0]).unsqueeze(0)
-    swap_index = torch.LongTensor([int(i) for i in swap_ind.strip().split(',')])
-    indicator[:, swap_index] = 2
-    flip_l1 = l1_data[indicator == 2]  # .numpy().tolist()
-    flip_l2 = l2_data[indicator == 2]  # .numpy().tolist()
-    flip_set = set([(i, j) for i, j in zip(flip_l1.numpy().tolist(), flip_l2.numpy().tolist())])
-    flip_l2_set, flip_l2_offset = torch.unique(flip_l2, sorted=True, return_inverse=True)
-    flip_l2_set = flip_l2_set.long()
-    flip_l2_offset = flip_l2_offset.long()
-
-    # for reward_computation
-    flip_l1_key, flip_l2_key = zip(*flip_set)
-    flip_l1_key = torch.Tensor(list(flip_l1_key)).long()
-    flip_l2_key = torch.Tensor(list(flip_l2_key)).long()
-
-    l1_d = l1_data.clone()
-    l2_d = l2_data.clone()
-    l1_d[indicator == 2] = l2_d[indicator == 2]
-    swap_str = ' '.join([(i2v[i.item()]
-                         if indicator[0, _idx] == 1 else (text_effect.UNDERLINE + i2gv[i.item()] + text_effect.END))
-                         for _idx, i in enumerate(l1_d[0, :])][1:-1])
-    print(swap_str)
-    data = l1_d
-    if model.is_cuda():
-        data = data.cuda()
-        indicator = indicator.cuda()
-        flip_l2 = flip_l2.cuda()
-        flip_l2_offset = flip_l2_offset.cuda()
-        flip_l2_set = flip_l2_set.cuda()
-
-        flip_l1_key = flip_l1_key.cuda()
-        flip_l2_key = flip_l2_key.cuda()
-
-        l1_key = l1_key.cuda()
-        l2_key = l2_key.cuda()
-
-    var_batch = lens, data, indicator
-    model.init_optimizer(type='SGD')
-    init_score_vocabtype = model.score_embeddings(l2_key, l1_key)
-    print('init score', init_score_vocabtype)
-    prev_step_score_vocabtype = init_score_vocabtype
-    improvement = 0.01
-    num_steps = 0
-    while improvement >= 0.01 and num_steps < 500:
-        loss, grad_norm = model.do_backprop(var_batch, seen=(flip_l2, flip_l2_offset, flip_l2_set))
-        step_score_vocabtype = model.score_embeddings(l2_key, l1_key)
-        improvement = step_score_vocabtype - prev_step_score_vocabtype
-        prev_step_score_vocabtype = step_score_vocabtype
-        num_steps += 1
-        print(num_steps, 'step score', step_score_vocabtype)
-    step_score_vocabtype = model.score_embeddings(l2_key, l1_key)
-    print('final score', step_score_vocabtype)
-    return step_score_vocabtype, model
-
 
 if __name__ == '__main__':
     print(sys.stdout.encoding)
@@ -104,11 +46,12 @@ if __name__ == '__main__':
                      help='gloss vocab to index pickle obj')
     opt.add_argument('--batch_size', action='store', type=int, dest='batch_size', default=1)
     opt.add_argument('--gpuid', action='store', type=int, dest='gpuid', default=-1)
-    opt.add_argument('--swap_prob', action='store', type=float, dest='swap_prob', default=0.25)
     opt.add_argument('--trained_model', action='store', dest='trained_model', required=True)
     opt.add_argument('--key', action='store', dest='key', required=True)
     opt.add_argument('--steps', action='store', dest='steps', required=False, default=10)
-    opt.add_argument('--epochs', action='store', type=int, dest='epochs', default=100)
+    opt.add_argument('--max_steps', action='store', dest='max_steps', default=100, type=int)
+    opt.add_argument('--improvement', action='store', dest='improvement_threshold', default=0.01, type=float)
+    opt.add_argument('--verbose', action='store_true', dest='verbose', default=False)
     options = opt.parse_args()
     print(options)
     if options.gpuid > -1:
@@ -182,16 +125,33 @@ if __name__ == '__main__':
     hist_flip_l2 = {}
     hist_limit = 1
     for batch_idx, batch in enumerate(dataloader):
-        old = cbilstm.encoder.weight.clone()
+        #old = cbilstm.encoder.weight.clone()
         old_g = cbilstm.g_encoder.weight.clone()
         lens, l1_data, l2_data = batch
         go_next = False
-        tt = []
         while not go_next:
             l1_str = ' '.join([str(_idx) + ':' + i2v[i.item()] for _idx, i in enumerate(l1_data[0, :])][1:-1])
             print('\n' + l1_str)
             swap_ind = input('swqp (1,' + str(lens[0]-2) + '): ')
-            swap_score, cbilstm = apply_swap(swap_ind, batch, l1_key, l2_key, cbilstm)
+            swap_ind = torch.LongTensor([int(i) for i in swap_ind.strip().split(',')])
+            l1_d = l1_data.clone()
+            l2_d = l2_data.clone()
+            indicator = torch.LongTensor([1] * l1_d.size(1)).unsqueeze(0)
+            indicator[:, swap_ind] = 2
+            swap_str = ' '.join([(i2v[l1_d[0, i].item()]
+                                 if indicator[0, i].item() == 1 else (text_effect.UNDERLINE + i2gv[l2_d[0, i].item()] + text_effect.END))
+                                 for i in range(1, l1_d.size(1) - 1)])
+            if options.verbose:
+                print(swap_str)
+            swap_score, cbilstm = apply_swap(swap_ind,
+                                             l1_d,
+                                             l2_d,
+                                             l1_key,
+                                             l2_key,
+                                             cbilstm,
+                                             options.max_steps,
+                                             options.improvement_threshold,
+                                             options.verbose)
             go_next = input('next line or retry (n/r):')
             go_next = go_next == 'n'
             if go_next:
@@ -202,6 +162,3 @@ if __name__ == '__main__':
                 cbilstm.g_encoder = g_wl_encoder
                 cbilstm.g_decoder = g_wl_decoder
                 cbilstm.init_param_freeze(CBiLSTM.L3_LEARNING)
-        from operator import itemgetter
-        for s, t in sorted(tt, key=itemgetter(0), reverse=True):
-            print(str(s) + ' ' + t)
