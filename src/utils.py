@@ -3,10 +3,12 @@ __author__ = 'arenduchintala'
 import linecache
 import numpy as np
 import torch
+import pdb
 
 from torch.utils.data import Dataset
 
 from model import CBiLSTM
+
 
 
 class text_effect:
@@ -51,28 +53,38 @@ def parallel_collate(batch):
 
 
 class ParallelTextDataset(Dataset):
-    def __init__(self, corpus_file, v2idx, gv2idx):
+    def __init__(self, corpus_file, s2i, t2i, data_mode='train'):
         self.corpus_file = corpus_file
-        self.UNK = '<UNK>'
         self.BOS = '<BOS>'
         self.EOS = '<EOS>'
         self.PAD = '<PAD>'
-        self.v2idx = v2idx
-        self.gv2idx = gv2idx
+        self.UNK = '<UNK>'
+        self.s2i = s2i
+        self.t2i = t2i
+        self.data_mode = data_mode
+        assert self.data_mode in ['train', 'test']
         with open(self.corpus_file, "r", encoding="utf-8") as f:
             self._total_data = len(f.readlines())
 
     def __getitem__(self, idx):
         line = linecache.getline(self.corpus_file, idx + 1)
-        line_items = line.split('|||')
-        l1_line = line_items[0].strip().split()
-        l2_line = line_items[1].strip().split()
-        l1_data = [self.v2idx[self.BOS]] + \
-                  [self.v2idx.get(w, self.v2idx[self.UNK]) for w in l1_line] + \
-                  [self.v2idx[self.EOS]]
-        l2_data = [self.v2idx[self.BOS]] + \
-                  [self.gv2idx.get(w, self.gv2idx[self.UNK]) for w in l2_line] + \
-                  [self.v2idx[self.EOS]]
+        if self.data_mode == 'train':
+            l1_line, l2_line = line.strip().split('|||')
+            l1_line = l1_line.strip().split()
+            l2_line = l2_line.strip().split()
+        elif self.data_mode == 'test':
+            l1_line = line.strip().split()
+            l2_line = [self.UNK for i in l1_line]
+        else:
+            pass
+
+        l1_data = [self.s2i[self.BOS]] + \
+                  [self.s2i.get(w, self.s2i[self.UNK]) for w in l1_line] + \
+                  [self.s2i[self.EOS]]
+        l2_data = [self.t2i[self.BOS]] + \
+                  [self.t2i.get(w, self.t2i[self.PAD]) for w in l2_line] + \
+                  [self.t2i[self.EOS]]
+        assert len(l1_data) == len(l2_data)
         return (len(l1_data), l1_data, l2_data)
 
     def __len__(self):
