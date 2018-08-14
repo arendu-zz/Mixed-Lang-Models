@@ -13,6 +13,7 @@ from rewards import prob_score_embeddings
 
 import pdb
 
+
 def get_unsort_idx(sort_idx):
     unsort_idx = torch.zeros_like(sort_idx).long().scatter_(0, sort_idx, torch.arange(sort_idx.size(0)).long())
     return unsort_idx
@@ -191,9 +192,9 @@ class VarEmbedding(nn.Module):
 
 
 class CBiLSTM(nn.Module):
-    L1_LEARNING = 'L1_LEARNING'
-    L2_LEARNING = 'L2_LEARNING'
-    L3_LEARNING = 'L3_LEARNING'
+    L1_LEARNING = 'L1_LEARNING'  # updates only l1 params i.e. base language model
+    L12_LEARNING = 'L12_LEARNING'  # updates both l1 params and l2 params (novel vocab embeddings)
+    L2_LEARNING = 'L2_LEARNING'  # update only l2 params
 
     def __init__(self, input_size,
                  encoder, decoder,
@@ -239,7 +240,7 @@ class CBiLSTM(nn.Module):
 
     def init_param_freeze(self, mode):
         self.mode = mode
-        if self.mode == CBiLSTM.L2_LEARNING or self.mode == CBiLSTM.L3_LEARNING:
+        if self.mode == CBiLSTM.L12_LEARNING or self.mode == CBiLSTM.L2_LEARNING:
             assert self.g_encoder is not None
             assert self.g_decoder is not None
             for p in self.encoder.parameters():
@@ -307,7 +308,7 @@ class CBiLSTM(nn.Module):
         # data = (batch_size x seq_len)
         v_encoded = self.encoder(data)
         v_inp_ind = v_ind.unsqueeze(2).expand(v_ind.size(0), v_ind.size(1), v_encoded.size(2)).float()
-        if self.mode == CBiLSTM.L2_LEARNING:
+        if self.mode == CBiLSTM.L12_LEARNING:
             g_encoded = self.g_encoder(data)
             g_inp_ind = g_ind.unsqueeze(2).expand(g_ind.size(0), g_ind.size(1), g_encoded.size(2)).float()
             encoded = v_inp_ind * v_encoded + g_inp_ind * g_encoded
@@ -330,7 +331,7 @@ class CBiLSTM(nn.Module):
 
         v_out = self.decoder(final_hidden)
         # v_out = (batch_size, seq_len, v_vocab_size)
-        if self.mode == CBiLSTM.L2_LEARNING or self.mode == CBiLSTM.L3_LEARNING:
+        if self.mode == CBiLSTM.L12_LEARNING or self.mode == CBiLSTM.L2_LEARNING:
             g_out = self.g_decoder(final_hidden)
         # g_out = (batch_size, seq_len, g_vocab_size)
 
@@ -344,7 +345,7 @@ class CBiLSTM(nn.Module):
             v_out = v_out.view(-1, v_out.size(2))[v_idx, :]
             loss = self.loss(v_out, v_data)
 
-        if self.mode == CBiLSTM.L2_LEARNING:
+        if self.mode == CBiLSTM.L12_LEARNING:
             data = data.view(-1)
             v_ind = v_ind.view(-1)
             d_idx = torch.arange(data.size(0)).type_as(data.data).long()
@@ -360,7 +361,7 @@ class CBiLSTM(nn.Module):
                 g_out = g_out.view(-1, g_out.size(2))[g_idx, :]
                 loss += self.loss(g_out, g_data)
 
-        if self.mode == CBiLSTM.L3_LEARNING:
+        if self.mode == CBiLSTM.L2_LEARNING:
             all_out = torch.cat([v_out, g_out[:, :, seen_set]], dim=2)
             all_data = data.clone()
             all_data[g_ind == 1] = seen_offset + v_out.size(2)
