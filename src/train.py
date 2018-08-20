@@ -9,19 +9,32 @@ import torch
 
 from model import CBiLSTM
 from model import VarEmbedding
+from model import VariationalEmbeddings
 from model import VarLinear
+from model import VariationalLinear
 from model import WordRepresenter
 from torch.utils.data import DataLoader
 from utils import LazyTextDataset
 from utils import my_collate
 
-from torch.autograd import Variable
+import pdb
 
 global PAD, EOS, BOS, UNK
 PAD = '<PAD>'
 UNK = '<UNK>'
 BOS = '<BOS>'
 EOS = '<EOS>'
+
+
+def make_vl_encoder(mean, rho, sigma_prior):
+    print('making VariationalEmbeddings with', sigma_prior)
+    variational_embedding = VariationalEmbeddings(mean, rho, sigma_prior)
+    return variational_embedding
+
+
+def make_vl_decoder(mean, rho):
+    variational_linear = VariationalLinear(mean, rho)
+    return variational_linear
 
 
 def make_cl_encoder(word_representer):
@@ -49,6 +62,7 @@ def make_wl_decoder(vocab_size, embedding_size, encoder):
     decoder.weight = encoder.weight
     return decoder
 
+
 if __name__ == '__main__':
     torch.manual_seed(1234)
     opt = argparse.ArgumentParser(description="write program description here")
@@ -57,7 +71,8 @@ if __name__ == '__main__':
     opt.add_argument('--save_dir', action='store', dest='save_folder', required=True,
                      help='folder to save the model after every epoch')
     opt.add_argument('--train_corpus', action='store', dest='train_corpus', required=True)
-    opt.add_argument('--train_mode', action='store', dest='train_mode', required=True, type=int, choices=set([0, 1]))
+    opt.add_argument('--train_mode', action='store', dest='train_mode', required=True, type=int,
+                     choices=set([0, 1]), help='train only l1 i.e. base lang model or mixed l1 and l2 training')
     opt.add_argument('--dev_corpus', action='store', dest='dev_corpus', required=False, default=None)
     opt.add_argument('--v2i', action='store', dest='v2i', required=True,
                      help='vocab to index pickle obj')
@@ -69,16 +84,17 @@ if __name__ == '__main__':
                      help='gloss vocab to index pickle obj')
     opt.add_argument('--gv2spell', action='store', dest='gv2spell', required=False, default=None,
                      help='gloss vocab to index pickle obj')
-    opt.add_argument('--w_embedding_size', action='store', type=int, dest='w_embedding_size', default=200)
+    opt.add_argument('--w_embedding_size', action='store', type=int, dest='w_embedding_size', default=500)
     opt.add_argument('--c_embedding_size', action='store', type=int, dest='c_embedding_size', default=20)
     opt.add_argument('--batch_size', action='store', type=int, dest='batch_size', default=20)
     opt.add_argument('--gpuid', action='store', type=int, dest='gpuid', default=-1)
     opt.add_argument('--epochs', action='store', type=int, dest='epochs', default=50)
-    opt.add_argument('--char_based', action='store', type=int, dest='char_based', default=0, choices=set([0, 1]))
     opt.add_argument('--char_composition', action='store', type=str,
-                     dest='char_composition', default='RNN', choices=set(['RNN', 'CNN']))
-    opt.add_argument('--char_bidirectional', action='store', type=int, dest='char_bidirectional', default=0,
-                     choices=set([0, 1]))
+                     dest='char_composition', default='None',
+                     choices=set(['RNN', 'CNN', 'None', 'Variational']))
+    opt.add_argument('--char_bidirectional', action='store', type=int, dest='char_bidirectional', default=1,
+                     required=False, choices=set([0, 1]))
+    opt.add_argument('--lsp', action='store', type=float, dest='lsp', default=0.)
     options = opt.parse_args()
     print(options)
     if options.gpuid > -1:
@@ -94,7 +110,8 @@ if __name__ == '__main__':
     gv2i = pickle.load(open(options.gv2i, 'rb')) if options.gv2i is not None else None
     gv2c = pickle.load(open(options.gv2spell, 'rb')) if options.gv2spell is not None else None
     c2i = pickle.load(open(options.c2i, 'rb'))
-    train_mode = CBiLSTM.L1_LEARNING if options.train_mode == 0 else CBiLSTM.L2_LEARNING
+
+    train_mode = CBiLSTM.L1_LEARNING if options.train_mode == 0 else CBiLSTM.L12_LEARNING
     dataset = LazyTextDataset(options.train_corpus, v2i, gv2i, train_mode)
     dataloader = DataLoader(dataset, batch_size=options.batch_size, shuffle=True, collate_fn=my_collate)
     if options.dev_corpus is not None:
@@ -104,10 +121,10 @@ if __name__ == '__main__':
     v_max_vocab = len(v2i)
     g_max_vocab = len(gv2i) if gv2i is not None else 0
     max_vocab = max(v_max_vocab, g_max_vocab)
-    if options.char_based == 0:
+    if options.char_composition == 'None':
         encoder = make_wl_encoder(max_vocab, options.w_embedding_size)
         decoder = make_wl_decoder(max_vocab, options.w_embedding_size, encoder)
-        if train_mode == CBiLSTM.L2_LEARNING:
+        if train_mode == CBiLSTM.L12_LEARNING:
             g_encoder = make_wl_encoder(max_vocab, options.w_embedding_size)
             g_decoder = make_wl_decoder(max_vocab, options.w_embedding_size, g_encoder)
         else:
@@ -115,9 +132,27 @@ if __name__ == '__main__':
             g_decoder = None
         cbilstm = CBiLSTM(options.w_embedding_size,
                           encoder, decoder, g_encoder, g_decoder, mode=train_mode)
+    elif options.char_composition == 'Variational':
+        mean = torch.FloatTensor(max_vocab, options.w_embedding_size).uniform_(-0.01 / options.w_embedding_size,
+                                                                               0.01 / options.w_embedding_size)
+        mean = torch.nn.Parameter(mean)
+        rho = 0.01 * torch.randn(max_vocab, options.w_embedding_size)
+        rho = torch.nn.Parameter(rho)
+        mean.requires_grad = True
+        rho.requires_grad = True
+        encoder = make_vl_encoder(mean, rho, float(np.exp(options.lsp))) #log sigma prior
+        decoder = make_vl_decoder(mean, rho)
+        if train_mode == CBiLSTM.L12_LEARNING:
+            raise NotImplementedError("only doing variational for L1_LEARNING")
+        else:
+            g_encoder = None
+            g_decoder = None
+        cbilstm = CBiLSTM(options.w_embedding_size,
+                          encoder, decoder, g_encoder, g_decoder, mode=train_mode)
     else:
-        wr = WordRepresenter(v2c, c2i, len(c2i), options.c_embedding_size,
-                             c2i[PAD], options.w_embedding_size // (2 if options.char_bidirectional else 1), options.w_embedding_size,
+        wr = WordRepresenter(v2c, c2i, len(c2i), options.c_embedding_size, c2i[PAD],
+                             options.w_embedding_size // (2 if options.char_bidirectional else 1),
+                             options.w_embedding_size,
                              bidirectional=options.char_bidirectional == 1,
                              is_extra_feat_learnable=False, num_required_vocab=max_vocab,
                              char_composition=options.char_composition)
@@ -125,10 +160,11 @@ if __name__ == '__main__':
             wr.init_cuda()
         cl_encoder = make_cl_encoder(wr)
         cl_decoder = make_cl_decoder(wr)
-        if train_mode == CBiLSTM.L2_LEARNING:
+        if train_mode == CBiLSTM.L12_LEARNING:
             assert gv2c is not None
-            g_wr = WordRepresenter(gv2c, c2i, len(c2i), options.c_embedding_size,
-                                   c2i[PAD], options.w_embedding_size // (2 if options.char_bidirectional else 1), options.w_embedding_size,
+            g_wr = WordRepresenter(gv2c, c2i, len(c2i), options.c_embedding_size, c2i[PAD],
+                                   options.w_embedding_size // (2 if options.char_bidirectional else 1),
+                                   options.w_embedding_size,
                                    bidirectional=options.char_bidirectional == 1,
                                    is_extra_feat_learnable=True, num_required_vocab=max_vocab,
                                    char_composition=options.char_composition)
@@ -153,13 +189,11 @@ if __name__ == '__main__':
         dev_losses = []
         for batch_idx, batch in enumerate(dataloader):
             l, data, ind = batch
-            data = Variable(data, requires_grad=False)
-            ind = Variable(ind, requires_grad=False)
             if cbilstm.is_cuda():
                 data = data.cuda()
                 ind = ind.cuda()
             batch = l, data, ind
-            loss, grad_norm = cbilstm.do_backprop(batch)
+            loss, grad_norm = cbilstm.do_backprop(batch, total_batches=total_batches)
             if batch_idx % 10 == 0 and batch_idx > 0:
                 e = time.time()
                 ave_time = (e - s) / 10.
@@ -173,8 +207,6 @@ if __name__ == '__main__':
             cbilstm.eval()
             for batch_idx, batch in enumerate(dataloader_dev):
                 l, data, ind = batch
-                data = Variable(data, requires_grad=False, volatile=True)
-                ind = Variable(ind, requires_grad=False, volatile=True)
                 if cbilstm.is_cuda():
                     data = data.cuda()
                     ind = ind.cuda()

@@ -3,6 +3,7 @@ __author__ = 'arenduchintala'
 import math
 import torch
 import torch.nn as nn
+import numpy as np
 
 from torch.nn.utils.rnn import pack_padded_sequence as pack
 from torch.nn.utils.rnn import pad_packed_sequence as unpack
@@ -191,6 +192,90 @@ class VarEmbedding(nn.Module):
         return var_data
 
 
+def log_gaussian(x, mu, sigma, log_sigma):
+    s = -0.5 * float(np.log(2 * np.pi)) - log_sigma - (((x - mu) ** 2) / (2 * sigma ** 2))
+    #return -0.5 * np.log(2 * np.pi) - torch.log(sigma) - (x - mu) ** 2 / (2 * sigma ** 2)
+    return s
+
+#def log_gaussian(x, mu, sigma):
+#    return float(-0.5 * np.log(2 * np.pi) - np.log(np.abs(sigma))) - (x - mu)**2 / (2 * sigma**2)
+
+
+#def log_gaussian_logsigma(x, mu, logsigma):
+#    return float(-0.5 * np.log(2 * np.pi)) - logsigma - (x - mu)**2 / (2 * torch.exp(logsigma)**2)
+
+
+class VariationalEmbeddings(nn.Module):
+    def __init__(self, mean, rho, sigma_prior=1.):
+        super(VariationalEmbeddings, self).__init__()
+        self.mean = mean
+        self.rho = rho
+        self.log_p_w = 0.
+        self.log_q_w = 0.
+        self.sigma_prior = sigma_prior
+
+    def forward(self, data):
+        return self.lookup(data)
+
+    def reparameterize(self,):
+        if self.training:
+            #std = torch.exp(0.5 * self.rho)
+            std = torch.log(1. + torch.exp(self.rho))  # softplus instead of exp
+            eps = torch.randn_like(std)
+            eps.requires_grad = False
+            embeddings = self.mean + std * eps
+            self.log_p_w = log_gaussian(embeddings, 0., self.sigma_prior, float(np.log(self.sigma_prior))).sum()
+            self.log_q_w = log_gaussian(embeddings, self.mean, std, torch.log(std)).sum()
+            return embeddings
+        else:
+            return self.mean
+
+    def sample_lookup(self, data):
+        batch_size, seq_len = data.shape
+
+    def lookup(self, data):
+        embeddings = self.reparameterize()
+        embedding_size = embeddings.size(1)
+        if data.dim() == 2:
+            batch_size = data.size(0)
+            seq_len = data.size(1)
+            data = data.contiguous()
+            data = data.view(-1)  # , data.size(0), data.size(1))
+            var_data = embeddings[data]
+            var_data = var_data.view(batch_size, seq_len, embedding_size)
+        else:
+            var_data = embeddings[data]
+        return var_data
+
+
+class VariationalLinear(nn.Module):
+    def __init__(self, mean, rho):
+        super(VariationalLinear, self).__init__()
+        self.mean = mean
+        self.rho = rho
+
+    def forward(self, data):
+        return self.matmul(data)
+
+    def reparameterize(self,):
+        if self.training:
+            std = torch.log(1. + torch.exp(self.rho))
+            eps = torch.randn_like(std)
+            eps.requires_grad = False
+            embeddings = self.mean + std * eps
+            return embeddings
+        else:
+            return self.mean
+
+    def matmul(self, data):
+        embeddings = self.reparameterize()
+        if data.dim() > 1:
+            assert data.size(-1) == embeddings.size(-1)
+            return torch.matmul(data, embeddings.transpose(0, 1))
+        else:
+            raise BaseException("data should be at least 2 dimensional")
+
+
 class CBiLSTM(nn.Module):
     L1_LEARNING = 'L1_LEARNING'  # updates only l1 params i.e. base language model
     L12_LEARNING = 'L12_LEARNING'  # updates both l1 params and l2 params (novel vocab embeddings)
@@ -215,7 +300,7 @@ class CBiLSTM(nn.Module):
                            batch_first=True,
                            bidirectional=True)
         self.init_param_freeze(mode)
-        self.loss = torch.nn.CrossEntropyLoss(size_average=True, ignore_index=0)
+        self.loss = torch.nn.CrossEntropyLoss(size_average=False, reduce=True, ignore_index=0)
         self.optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()))
         self.eos_sym = None
         self.bos_sym = None
@@ -371,10 +456,23 @@ class CBiLSTM(nn.Module):
 
         return loss
 
-    def do_backprop(self, batch, seen=None):
+    def do_backprop(self, batch, seen=None, total_batches=None):
         self.optimizer.zero_grad()
         l = self(batch, seen)
+        if isinstance(self.encoder, VariationalEmbeddings):
+            #print('encoder mu', self.encoder.mean[10].sum())
+            #print('decoder mu', self.decoder.mean[10].sum())
+            #print('encoder rho', self.encoder.rho[10].sum())
+            #print('decoder rho', self.decoder.rho[10].sum())
+            #print('\nlpw', self.encoder.log_p_w.item())
+            #print('lqw', self.encoder.log_q_w.item())
+            kl_loss = (1. / total_batches) * (self.encoder.log_q_w - self.encoder.log_p_w)
+            #print('kl', kl_loss.item())
+            #print('l', l.item())
+            l += kl_loss
+            #print('full', l.item())
         l.backward()
+        #print(self.encoder.weight[10], self.encoder.weight[10].sum())
         grad_norm = torch.nn.utils.clip_grad_norm_(filter(lambda p: p.requires_grad, self.parameters()),
                                                    self.max_grad_norm)
         if math.isnan(grad_norm):
