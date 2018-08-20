@@ -105,7 +105,7 @@ if __name__ == '__main__':
         cbilstm.decoder = decoder
         cbilstm.g_encoder = g_cl_encoder
         cbilstm.g_decoder = g_cl_decoder
-        cbilstm.init_param_freeze(CBiLSTM.L3_LEARNING)
+        cbilstm.init_param_freeze(CBiLSTM.L2_LEARNING)
     else:
         learned_weights = cbilstm.encoder.weight.data.clone()
         we_size = cbilstm.encoder.weight.size(1)
@@ -118,7 +118,7 @@ if __name__ == '__main__':
         cbilstm.decoder = decoder
         cbilstm.g_encoder = g_wl_encoder
         cbilstm.g_decoder = g_wl_decoder
-        cbilstm.init_param_freeze(CBiLSTM.L3_LEARNING)
+        cbilstm.init_param_freeze(CBiLSTM.L2_LEARNING)
     if options.gpuid > -1:
         cbilstm.init_cuda()
     print(cbilstm)
@@ -161,4 +161,4 @@ if __name__ == '__main__':
                 g_wl_decoder = make_wl_decoder(max_vocab, we_size, g_wl_encoder)
                 cbilstm.g_encoder = g_wl_encoder
                 cbilstm.g_decoder = g_wl_decoder
-                cbilstm.init_param_freeze(CBiLSTM.L3_LEARNING)
+                cbilstm.init_param_freeze(CBiLSTM.L2_LEARNING)
