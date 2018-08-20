@@ -21,7 +21,6 @@ from utils import parallel_collate
 from utils import text_effect
 
 import numpy as np
-import pdb
 
 global PAD, EOS, BOS, UNK
 PAD = '<PAD>'
@@ -296,7 +295,6 @@ if __name__ == '__main__':
                     pass
             stack.sort(key=attrgetter('score'), reverse=True)
             stack = stack[:beam_size]  # keep best successors
-        pdb.set_trace()
         if options.hillclimb == 1:
             print('perform hillclimb')
             iters = 0
@@ -357,7 +355,6 @@ if __name__ == '__main__':
         g_weights = best_hyp.weights.clone()
         score = best_hyp.score
         macaronic_sents.append((best_hyp.sent_str, best_hyp.score))
-        pdb.set_trace()
 
     print('search completed')
     for sent, score in macaronic_sents:
