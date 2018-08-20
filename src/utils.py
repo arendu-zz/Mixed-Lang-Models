@@ -108,7 +108,7 @@ class LazyTextDataset(Dataset):
     def __getitem__(self, idx):
         line = linecache.getline(self.corpus_file, idx + 1)
         line_items = line.split('|||')
-        if self.mode == CBiLSTM.L2_LEARNING:
+        if self.mode == CBiLSTM.L12_LEARNING:
             assert len(line_items) == 2
             l1_line = line_items[0].strip().split()
             l2_line = line_items[1].strip().split()

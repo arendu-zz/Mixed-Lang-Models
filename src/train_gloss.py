@@ -34,7 +34,7 @@ if __name__ == '__main__':
     opt.add_argument('--rnn_size', action='store', type=int, dest='rnn_size', default=100)
     opt.add_argument('--rnn_layers', action='store', type=int, dest='rnn_layers', default=1)
     opt.add_argument('--embedding_size', action='store', type=int, dest='embedding_size', default=500)
-    opt.add_argument('--epochs', action='store', type=int, dest='epochs', default=100)
+    opt.add_argument('--epochs', action='store', type=int, dest='epochs', default=200)
     options = opt.parse_args()
     print(options)
     if options.gpuid > -1:
@@ -76,9 +76,9 @@ if __name__ == '__main__':
     ave_time = 0.
     s = time.time()
     for epoch in range(options.epochs):
-        glosstagger.train()
         train_losses = []
         dev_losses = []
+        glosstagger.train()
         for batch_idx, batch in enumerate(dataloader):
             lengths, data, labels = batch
             if glosstagger.is_cuda():
