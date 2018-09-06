@@ -2,10 +2,13 @@
 import argparse
 import collections
 import copy
+import numpy as np
 from operator import attrgetter
 import pickle
 import sys
 import torch
+
+import pdb
 
 
 from model import CBiLSTM
@@ -20,7 +23,6 @@ from utils import ParallelTextDataset
 from utils import parallel_collate
 from utils import text_effect
 
-import numpy as np
 
 global PAD, EOS, BOS, UNK
 PAD = '<PAD>'
@@ -37,16 +39,25 @@ def get_stochastic_neighbors(hyp, num_neighbors=5):
     for _ in range(num_neighbors):
         swap = hyp.swaps.copy()
         remaining_swap = hyp.remaining_swaps.copy()
-        num_swap_additions = np.random.randint(1, 1 + (len(remaining_swap) // 2))
-        num_swap_removals = np.random.randint(1, 1 + (len(swap) // 2))
+        #num_swap_additions = np.random.randint(1, 1 + (len(remaining_swap) // 2))
+        num_swap_additions = 1  #np.random.randint(1, 3)
+        #num_swap_removals = np.random.randint(1, 1 + (len(swap) // 2))
+        num_swap_removals = 1 #np.random.randint(1, 3)
         # take from remaining swaps randomly and add to this list
-        swap_additions = set(np.random.choice(list(remaining_swap),
-                                              num_swap_additions,
-                                              replace=False).tolist())
+        if len(remaining_swap) > 0:
+            swap_additions = set(np.random.choice(list(remaining_swap),
+                                                  num_swap_additions,
+                                                  replace=False).tolist())
+        else:
+            swap_additions = set([])
+
         # take from existing swaps randomly and add this this list
-        swap_removals = set(np.random.choice(list(swap),
-                                             num_swap_removals,
-                                             replace=False).tolist())
+        if len(swap) > 0:
+            swap_removals = set(np.random.choice(list(swap),
+                                                 num_swap_removals,
+                                                 replace=False).tolist())
+        else:
+            swap_removals = set([])
         neighbor_swap = swap.difference(swap_removals)
         neighbor_swap = neighbor_swap.union(swap_additions)
 
@@ -230,13 +241,25 @@ if __name__ == '__main__':
     macaronic_sents = []
     for batch_idx, batch in enumerate(dataloader):
         lens, l1_data, l2_data = batch
-        l1_str = ' '.join([str(_idx) + ':' + i2v[i.item()] for _idx, i in enumerate(l1_data[0, :])][1:-1])
-        print('\n' + l1_str)
 
         # setup stack
         swaps = set([])
         remaining_swaps = set(range(1, l1_data[0, :].size(0) - 1))
-        hyp_0 = Hyp(score, swaps, remaining_swaps, g_weights, l1_str)
+        swap_ind = torch.LongTensor([int(i) for i in sorted(list(swaps))])
+        l1_d = l1_data.clone()
+        l2_d = l2_data.clone()
+        indicator = torch.LongTensor([1] * l1_d.size(1)).unsqueeze(0)
+        indicator[:, swap_ind] = 2
+        l1_str = ' '.join([str(_idx) + ':' + i2v[i.item()] for _idx, i in enumerate(l1_data[0, :])][1:-1])
+        macaronic_0 = ' '.join([(i2v[l1_d[0, i].item()]
+                               if indicator[0, i].item() == 1
+                               else (text_effect.UNDERLINE + i2gv[l2_d[0, i].item()] + text_effect.END))
+                               for i in range(1, l1_d.size(1) - 1)])
+        g_weights = cbilstm.g_encoder.weight.clone()
+        score = cbilstm.score_embeddings(l2_key, l1_key)
+        hyp_0 = Hyp(score, swaps, remaining_swaps, g_weights, macaronic_0)
+        if options.verbose:
+            print('\n' + l1_str)
         stack = [hyp_0]
         best_hyp = hyp_0
         swap_limit = int(float(l1_data[0, :].size(0)) * options.swap_limit)
@@ -290,6 +313,7 @@ if __name__ == '__main__':
                                   remaining_swaps=new_remaining_swaps,
                                   weights=g_weights.clone(),  # cbilstm.g_encoder.weight.clone(),
                                   sent_str=new_macaronic)
+                    #print('new hyp sent str', new_hyp.sent_str, new_hyp.score)
                     stack.append(new_hyp)
                 else:
                     pass
