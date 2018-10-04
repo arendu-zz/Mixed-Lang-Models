@@ -11,7 +11,7 @@ from model import CBiLSTM
 
 
 
-class text_effect:
+class TEXT_EFFECT:
     PURPLE = '\033[95m'
     CYAN = '\033[96m'
     DARKCYAN = '\033[36m'

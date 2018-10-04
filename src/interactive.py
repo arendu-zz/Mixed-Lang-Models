@@ -8,6 +8,7 @@ from model import CBiLSTM
 from model import VarEmbedding
 from model import WordRepresenter
 from search import apply_swap
+from search import MacaronicSentence
 from torch.utils.data import DataLoader
 from train import make_cl_decoder
 from train import make_cl_encoder
@@ -15,8 +16,7 @@ from train import make_wl_decoder
 from train import make_wl_encoder
 from utils import ParallelTextDataset
 from utils import parallel_collate
-from utils import text_effect
-
+from utils import TEXT_EFFECT
 import pdb
 
 
@@ -48,7 +48,6 @@ if __name__ == '__main__':
     opt.add_argument('--gpuid', action='store', type=int, dest='gpuid', default=-1)
     opt.add_argument('--trained_model', action='store', dest='trained_model', required=True)
     opt.add_argument('--key', action='store', dest='key', required=True)
-    opt.add_argument('--steps', action='store', dest='steps', required=False, default=10)
     opt.add_argument('--max_steps', action='store', dest='max_steps', default=100, type=int)
     opt.add_argument('--improvement', action='store', dest='improvement_threshold', default=0.01, type=float)
     opt.add_argument('--verbose', action='store_true', dest='verbose', default=False)
@@ -80,6 +79,8 @@ if __name__ == '__main__':
     g_max_vocab = len(gv2i) if gv2i is not None else 0
     max_vocab = max(v_max_vocab, g_max_vocab)
     cbilstm = torch.load(options.trained_model, map_location=lambda storage, loc: storage)
+    cbilstm.set_key(l1_key, l2_key)
+    cbilstm.init_key()
     if isinstance(cbilstm.encoder, VarEmbedding):
         wr = cbilstm.encoder.word_representer
         we_size = wr.we_size
@@ -99,8 +100,8 @@ if __name__ == '__main__':
             g_wr.init_cuda()
         g_cl_encoder = make_cl_encoder(g_wr)
         g_cl_decoder = make_cl_decoder(g_wr)
-        encoder = make_wl_encoder(max_vocab, we_size, learned_weights.data.clone())
-        decoder = make_wl_decoder(max_vocab, we_size, encoder)
+        encoder = make_wl_encoder(None, None, learned_weights.data.clone())
+        decoder = make_wl_decoder(encoder)
         cbilstm.encoder = encoder
         cbilstm.decoder = decoder
         cbilstm.g_encoder = g_cl_encoder
@@ -110,10 +111,10 @@ if __name__ == '__main__':
         learned_weights = cbilstm.encoder.weight.data.clone()
         we_size = cbilstm.encoder.weight.size(1)
         max_vocab = cbilstm.encoder.weight.size(0)
-        encoder = make_wl_encoder(max_vocab, we_size, learned_weights)
-        decoder = make_wl_decoder(max_vocab, we_size, encoder)
-        g_wl_encoder = make_wl_encoder(max_vocab, we_size)
-        g_wl_decoder = make_wl_decoder(max_vocab, we_size, g_wl_encoder)
+        encoder = make_wl_encoder(None, None, learned_weights)
+        decoder = make_wl_decoder(encoder)
+        g_wl_encoder = make_wl_encoder(max_vocab, we_size, None)
+        g_wl_decoder = make_wl_decoder(g_wl_encoder)
         cbilstm.encoder = encoder
         cbilstm.decoder = decoder
         cbilstm.g_encoder = g_wl_encoder
@@ -124,41 +125,51 @@ if __name__ == '__main__':
     print(cbilstm)
     hist_flip_l2 = {}
     hist_limit = 1
+    if cbilstm.is_cuda:
+        sent_init_weights = cbilstm.g_encoder.weight.clone().detach().cpu()
+    else:
+        sent_init_weights = cbilstm.g_encoder.weight.clone().detach()
+
     for batch_idx, batch in enumerate(dataloader):
-        #old = cbilstm.encoder.weight.clone()
         old_g = cbilstm.g_encoder.weight.clone()
         lens, l1_data, l2_data = batch
+        l1_tokens = [i2v[i.item()] for i in l1_data[0, :]]
+        l2_tokens = [i2gv[i.item()] for i in l2_data[0, :]]
+        swapped = set([])
+        swappable = set(range(1, l1_data[0, :].size(0) - 1))
+        macaronic_0 = MacaronicSentence(l1_tokens, l2_tokens, l1_data.clone(), l2_data.clone(), swapped, swappable)
         go_next = False
         while not go_next:
-            l1_str = ' '.join([str(_idx) + ':' + i2v[i.item()] for _idx, i in enumerate(l1_data[0, :])][1:-1])
+            l1_str = ' '.join([str(_idx) + ':' + i for _idx, i in enumerate(macaronic_0.tokens_l1)][1:-1])
             print('\n' + l1_str)
-            swap_ind = input('swqp (1,' + str(lens[0]-2) + '): ')
-            swap_ind = torch.LongTensor([int(i) for i in swap_ind.strip().split(',')])
-            l1_d = l1_data.clone()
-            l2_d = l2_data.clone()
-            indicator = torch.LongTensor([1] * l1_d.size(1)).unsqueeze(0)
-            indicator[:, swap_ind] = 2
-            swap_str = ' '.join([(i2v[l1_d[0, i].item()]
-                                 if indicator[0, i].item() == 1 else (text_effect.UNDERLINE + i2gv[l2_d[0, i].item()] + text_effect.END))
-                                 for i in range(1, l1_d.size(1) - 1)])
+            swaps_selected = input('swqp (1,' + str(lens[0]-2) + '): ').split(',')
+            swaps_selected = set([int(i) for i in swaps_selected])
+            swap_str = ' '.join([(i2v[l1_data[0, i].item()]
+                                 if i not in swaps_selected else (TEXT_EFFECT.UNDERLINE + i2gv[l2_data[0, i].item()] + TEXT_EFFECT.END))
+                                 for i in range(1, l1_data.size(1) - 1)])
+            new_macaronic = macaronic_0.copy() #.deepcopy(curr_hyp.macaronic_sentence)
+            for a in swaps_selected:
+                new_macaronic.swapped.add(a)
+                new_macaronic.swappable.remove(a)
             if options.verbose:
-                print(swap_str)
-            swap_score, cbilstm = apply_swap(swap_ind,
-                                             l1_d,
-                                             l2_d,
-                                             l1_key,
-                                             l2_key,
-                                             cbilstm,
-                                             options.max_steps,
-                                             options.improvement_threshold,
-                                             options.verbose)
-            go_next = input('next line or retry (n/r):')
+                print(new_macaronic)
+            swap_score, new_weights = apply_swap(new_macaronic,
+                                                 cbilstm,
+                                                 sent_init_weights,
+                                                 options)
+            print(new_weights.sum(), sent_init_weights.sum())
+            go_next = 'r' #input('next line or retry (n/r):')
             go_next = go_next == 'n'
             if go_next:
-                pass
+                print('going to next...')
+                if cbilstm.is_cuda:
+                    sent_init_weights = cbilstm.g_encoder.weight.clone().detach().cpu()
+                else:
+                    sent_init_weights = cbilstm.g_encoder.weight.clone().detach()
             else:
-                g_wl_encoder = make_wl_encoder(max_vocab, we_size, old_g.data.clone())
-                g_wl_decoder = make_wl_decoder(max_vocab, we_size, g_wl_encoder)
-                cbilstm.g_encoder = g_wl_encoder
-                cbilstm.g_decoder = g_wl_decoder
-                cbilstm.init_param_freeze(CBiLSTM.L2_LEARNING)
+                #g_wl_encoder = make_wl_encoder(max_vocab, we_size, old_g.data.clone())
+                #g_wl_decoder = make_wl_decoder(max_vocab, we_size, g_wl_encoder)
+                #cbilstm.g_encoder = g_wl_encoder
+                #cbilstm.g_decoder = g_wl_decoder
+                #cbilstm.init_param_freeze(CBiLSTM.L2_LEARNING)
+                pass

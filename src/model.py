@@ -307,6 +307,8 @@ class CBiLSTM(nn.Module):
         #self.z = Variable(torch.zeros(1, 1, self.rnn_size), requires_grad=False)
         self.z = torch.zeros(1, 1, self.rnn_size, requires_grad=False)
         # .expand(batch_size, 1, self.rnn_size), requires_grad=False)
+        self.l1_key = None
+        self.l2_key = None
 
     def init_optimizer(self, type='Adam'):
         if type == 'Adam':
@@ -318,6 +320,17 @@ class CBiLSTM(nn.Module):
                                                max_iter=3, history_size=2)
         else:
             raise NotImplementedError("unknonw optimizer option")
+
+    def set_key(self, l1_key, l2_key):
+        self.l1_key = l1_key
+        self.l2_key = l2_key
+
+    def init_key(self,):
+        if self.l1_key is not None:
+            self.l1_key = self.l1_key.cuda()
+        if self.l2_key is not None:
+            self.l2_key = self.l2_key.cuda()
+
 
     def init_cuda(self,):
         self = self.cuda()
@@ -365,15 +378,27 @@ class CBiLSTM(nn.Module):
     def is_cuda(self,):
         return self.rnn.weight_hh_l0.is_cuda
 
-    def score_embeddings(self, l2_key, l1_key):
+    def set_reset_weight(self,):
+        self.reset_weight = self.g_encoder.weight.detach().clone()
+
+    def update_g_weights(self, weights):
+        if self.is_cuda():
+            weights = weights.clone().cuda()
+        else:
+            weights = weights.clone()
+        self.g_encoder.weight.data = weights
+        self.g_decoder.weight.data = weights
+
+    def score_embeddings(self,):
         if isinstance(self.encoder, VarEmbedding):
             raise NotImplementedError("only word level scores")
         else:
             l1_embedding = self.encoder.weight.data
             l2_embedding = self.g_encoder.weight.data
-            l2_key = l2_key.cuda() if self.is_cuda() else l2_key
-            l1_key = l1_key.cuda() if self.is_cuda() else l1_key
-            s = score_embeddings(l2_embedding, l1_embedding, l2_key, l1_key)
+            # l2_key = l2_key.cuda() if self.is_cuda() else l2_key
+            # l1_key = l1_key.cuda() if self.is_cuda() else l1_key
+            s = score_embeddings(l2_embedding, l1_embedding, self.l2_key, self.l1_key)
+
             # ps = prob_score_embeddings(l2_embedding, l1_embedding, l2_key, l1_key)
             return s.item()
 

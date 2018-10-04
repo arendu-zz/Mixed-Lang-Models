@@ -47,18 +47,21 @@ def make_cl_decoder(word_representer):
     return d
 
 
-def make_wl_encoder(vocab_size, embedding_size, wt=None):
-    e = torch.nn.Embedding(vocab_size, embedding_size)
+def make_wl_encoder(vocab_size=None, embedding_size=None, wt=None):
     if wt is None:
+        assert vocab_size is not None
+        assert embedding_size is not None
+        e = torch.nn.Embedding(vocab_size, embedding_size)
         e.weight = torch.nn.Parameter(torch.FloatTensor(vocab_size, embedding_size).uniform_(-0.01 / embedding_size,
                                                                                              0.01 / embedding_size))
     else:
+        e = torch.nn.Embedding(wt.size(0), wt.size(1))
         e.weight = torch.nn.Parameter(wt)
     return e
 
 
-def make_wl_decoder(vocab_size, embedding_size, encoder):
-    decoder = torch.nn.Linear(embedding_size, vocab_size, bias=False)
+def make_wl_decoder(encoder):
+    decoder = torch.nn.Linear(encoder.weight.size(0), encoder.weight.size(1), bias=False)
     decoder.weight = encoder.weight
     return decoder
 
@@ -140,7 +143,7 @@ if __name__ == '__main__':
         rho = torch.nn.Parameter(rho)
         mean.requires_grad = True
         rho.requires_grad = True
-        encoder = make_vl_encoder(mean, rho, float(np.exp(options.lsp))) #log sigma prior
+        encoder = make_vl_encoder(mean, rho, float(np.exp(options.lsp)))  # log sigma prior
         decoder = make_vl_decoder(mean, rho)
         if train_mode == CBiLSTM.L12_LEARNING:
             raise NotImplementedError("only doing variational for L1_LEARNING")
