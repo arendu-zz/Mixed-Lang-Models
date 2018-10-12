@@ -8,7 +8,6 @@ import pickle
 import sys
 import torch
 
-
 from model import CBiLSTM
 from model import VarEmbedding
 from model import WordRepresenter
@@ -79,8 +78,8 @@ class MacaronicSentence(object):
     def copy(self,):
         macaronic_copy = MacaronicSentence(self.tokens_l1,  # this does not change so need not deep copy
                                            self.tokens_l2,  # this also does not change
-                                           self.int_l1.clone(),  # same
-                                           self.int_l2.clone(),  # same
+                                           self.int_l1, #.clone(),  # same
+                                           self.int_l2, #.clone(),  # same
                                            copy.deepcopy(self.swapped),  # this  does change so we deepcopy
                                            copy.deepcopy(self.swappable))
         return macaronic_copy
@@ -95,8 +94,8 @@ class MacaronicSentence(object):
 
 
 def prep_swap(macaronic_config):
-    macaronic_d1 = torch.LongTensor(macaronic_config.int_l1)
-    macaronic_d2 = torch.LongTensor(macaronic_config.int_l2)
+    macaronic_d1 = macaronic_config.int_l1.clone()
+    macaronic_d2 = macaronic_config.int_l2.clone()
     swap_ind = torch.LongTensor(sorted(list(macaronic_config.swapped)))
     indicator = torch.LongTensor([1] * macaronic_d1.size(1)).unsqueeze(0)
     indicator[:, swap_ind] = 2
@@ -116,7 +115,7 @@ def prep_swap(macaronic_config):
     return macaronic_d1, indicator, flip_l2, flip_l2_offset, flip_l2_set
 
 
-def apply_swap(macaronic_config, model, weights, options):
+def apply_swap(macaronic_config, model, weights, swap_penalty):
     macaronic_d, indicator, flip_l2, flip_l2_offset, flip_l2_set = prep_swap(macaronic_config)
     if model.is_cuda():
         macaronic_d = macaronic_d.cuda()
@@ -125,53 +124,35 @@ def apply_swap(macaronic_config, model, weights, options):
         flip_l2_offset = flip_l2_offset.cuda()
         flip_l2_set = flip_l2_set.cuda()
 
-        # flip_l1_key = flip_l1_key.cuda()
-        # flip_l2_key = flip_l2_key.cuda()
-
-        #l1_key = l1_key.cuda()
-        #l2_key = l2_key.cuda()
-
     var_batch = [macaronic_d.size(1)], macaronic_d, indicator
-    #g_wl_encoder = make_wl_encoder(max_vocab, we_size, weights)
-    #g_wl_decoder = make_wl_decoder(max_vocab, we_size, g_wl_encoder)
-    #model.g_encoder = g_wl_encoder
-    #model.g_decoder = g_wl_decoder
-    #print('old weights', model.g_encoder.weight.sum(), model.g_decoder.weight.sum())
     model.update_g_weights(weights)
-    #print('set weights', model.g_encoder.weight.sum(), model.g_decoder.weight.sum())
-    #model.init_param_freeze(CBiLSTM.L2_LEARNING)
-    #model.init_optimizer(type='SGD')
     model.init_param_freeze(CBiLSTM.L2_LEARNING)
-    model.init_optimizer(type='SGD')
-    if options.verbose:
-        init_score_vocabtype = model.score_embeddings()
-        print('init score', init_score_vocabtype)
-    prev_loss = 100.
-    num_steps = 0
-    improvement = 1.
-    while improvement >= options.improvement_threshold and num_steps < options.max_steps:
-        loss, grad_norm = model.do_backprop(var_batch, seen=(flip_l2, flip_l2_offset, flip_l2_set))
-        step_score_vocabtype = model.score_embeddings()
-        #improvement = step_score_vocabtype - prev_step_score_vocabtype
-        improvement = prev_loss - loss
-        #prev_step_score_vocabtype = step_score_vocabtype
-        prev_loss = loss
-        num_steps += 1
-        #if verbose:
-        #    print(num_steps, 'step score', step_score_vocabtype, 'loss', loss)
+    model.init_optimizer(type='Adam')
+    #prev_loss = 100.
+    #num_steps = 0
+    #improvement = 1.
+    #while improvement >= improvement_threshold and num_steps < max_steps:
+    loss, grad_norm = model.do_backprop(var_batch, seen=(flip_l2, flip_l2_offset, flip_l2_set))
+    step_score_vocabtype = model.score_embeddings()
+    #improvement = step_score_vocabtype - prev_step_score_vocabtype
+    #improvement = prev_loss - loss
+    #prev_step_score_vocabtype = step_score_vocabtype
+    #prev_loss = loss
+    #num_steps += 1
+    #if verbose:
+    #    print(num_steps, 'step score', step_score_vocabtype, 'loss', loss)
     #step_score_vocabtype = model.score_embeddings(l2_key, l1_key)
+    print(step_score_vocabtype)
+    step_score_vocabtype = step_score_vocabtype - (swap_penalty * len(macaronic_config.swapped))
+    print(step_score_vocabtype)
     new_weights = model.g_encoder.weight.clone().detach().cpu()
-    if options.verbose:
-        print('final score', step_score_vocabtype)
-        #print('new weights', model.g_encoder.weight.sum(), model.g_decoder.weight.sum())
     return step_score_vocabtype, new_weights
 
 
 def beam_search(init_config, init_weights, model, options):
-    score_0, _ = apply_swap(init_config,
-                            model,
-                            init_weights,
-                            options)
+    penalty = options.penalty
+    model.update_g_weights(init_weights)
+    score_0 = model.score_embeddings()
     hyp_0 = Hyp(score_0, init_weights, init_config)
     best_hyp = hyp_0
     stack = [hyp_0]
@@ -196,12 +177,14 @@ def beam_search(init_config, init_weights, model, options):
                 new_score, new_weights = apply_swap(new_macaronic,
                                                     model,
                                                     init_weights,
-                                                    options)
+                                                    penalty)
                 # save new weights into new hyp
-                new_hyp = Hyp(score=new_score - (options.penalty * len(new_macaronic.swapped)),
+                new_hyp = Hyp(score=new_score,
                               weights=new_weights,
                               macaronic_sentence=new_macaronic)
+
                 stack.append(new_hyp)
+                print('stack len', len(stack))
             else:
                 pass
         stack.sort(key=attrgetter('score'), reverse=True)
@@ -238,7 +221,7 @@ if __name__ == '__main__':
     opt.add_argument('--key', action='store', dest='key', required=True)
     opt.add_argument('--beam_size', action='store', dest='beam_size', default=10, type=int)
     opt.add_argument('--swap_limit', action='store', dest='swap_limit', default=0.3, type=float)
-    opt.add_argument('--max_steps', action='store', dest='max_steps', default=100, type=int)
+    opt.add_argument('--max_steps', action='store', dest='max_steps', default=10, type=int)
     opt.add_argument('--improvement', action='store', dest='improvement_threshold', default=0.01, type=float)
     opt.add_argument('--penalty', action='store', dest='penalty', default=0.0, type=float)
     opt.add_argument('--verbose', action='store_true', dest='verbose', default=False)
@@ -326,9 +309,12 @@ if __name__ == '__main__':
         swappable = set(range(1, l1_data[0, :].size(0) - 1))
         l1_tokens = [i2v[i.item()] for i in l1_data[0, :]]
         l2_tokens = [i2gv[i.item()] for i in l2_data[0, :]]
-        macaronic_0 = MacaronicSentence(l1_tokens, l2_tokens, l1_data.clone(), l2_data.clone(), swapped, swappable)
+        macaronic_0 = MacaronicSentence(l1_tokens, l2_tokens, l1_data, l2_data, swapped, swappable)
         config, weights, score = beam_search(macaronic_0, weights, cbilstm, options)
+        print('completed ', sent_idx, 'score ', score)
+        print(str(config))
         macaronic_sents.append((config, score))
+        pdb.set_trace()
 
     print('search completed')
     for sent, score in macaronic_sents:

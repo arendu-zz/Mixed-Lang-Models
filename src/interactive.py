@@ -49,6 +49,7 @@ if __name__ == '__main__':
     opt.add_argument('--trained_model', action='store', dest='trained_model', required=True)
     opt.add_argument('--key', action='store', dest='key', required=True)
     opt.add_argument('--max_steps', action='store', dest='max_steps', default=100, type=int)
+    opt.add_argument('--penalty', action='store', dest='penalty', default=0.0, type=float)
     opt.add_argument('--improvement', action='store', dest='improvement_threshold', default=0.01, type=float)
     opt.add_argument('--verbose', action='store_true', dest='verbose', default=False)
     options = opt.parse_args()
@@ -125,6 +126,7 @@ if __name__ == '__main__':
     print(cbilstm)
     hist_flip_l2 = {}
     hist_limit = 1
+    penalty = options.penalty #* ( 1.0 / 8849.0)
     if cbilstm.is_cuda:
         sent_init_weights = cbilstm.g_encoder.weight.clone().detach().cpu()
     else:
@@ -156,9 +158,9 @@ if __name__ == '__main__':
             swap_score, new_weights = apply_swap(new_macaronic,
                                                  cbilstm,
                                                  sent_init_weights,
-                                                 options)
-            print(new_weights.sum(), sent_init_weights.sum())
-            go_next = 'r' #input('next line or retry (n/r):')
+                                                 penalty)
+            print('swap score', swap_score)
+            go_next = input('next line or retry (n/r):')
             go_next = go_next == 'n'
             if go_next:
                 print('going to next...')

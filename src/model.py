@@ -12,8 +12,6 @@ from rewards import batch_cosine_sim
 from rewards import score_embeddings
 from rewards import prob_score_embeddings
 
-import pdb
-
 
 def get_unsort_idx(sort_idx):
     unsort_idx = torch.zeros_like(sort_idx).long().scatter_(0, sort_idx, torch.arange(sort_idx.size(0)).long())
@@ -285,7 +283,7 @@ class CBiLSTM(nn.Module):
                  encoder, decoder,
                  g_encoder, g_decoder,
                  mode,
-                 dropout=0.3, max_grad_norm=5.0):
+                 dropout=0.3, max_grad_norm=1.0):
         super(CBiLSTM, self).__init__()
         self.encoder = encoder
         self.decoder = decoder
@@ -314,7 +312,7 @@ class CBiLSTM(nn.Module):
         if type == 'Adam':
             self.optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()))
         elif type == 'SGD':
-            self.optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.parameters()), lr=1.0)
+            self.optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.parameters()), lr=1.)
         elif type == 'LBFGS':
             self.optimizer = torch.optim.LBFGS(filter(lambda p: p.requires_grad, self.parameters()),
                                                max_iter=3, history_size=2)
