@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 import argparse
-import collections
 import copy
 import numpy as np
 from operator import attrgetter
@@ -19,7 +18,8 @@ from train import make_wl_encoder
 from utils import ParallelTextDataset
 from utils import parallel_collate
 from utils import TEXT_EFFECT
-import pdb
+import time
+
 
 global PAD, EOS, BOS, UNK
 PAD = '<PAD>'
@@ -39,20 +39,141 @@ class Hyp(object):
     def __str__(self,):
         return str(self.macaronic_sentence)
 
+class PriorityQ(object):
+    def __init__(self, maxsize):
+        self.maxsize = maxsize
+        self.__q = []
+
+    def append(self, item):
+        self.__q.append(item)
+        self.__q.sort(key=attrgetter('score'), reverse=True)
+        self.__q = self.__q[:self.maxsize]  # keep best successors
+
+    def pop(self, random=False):
+        if random:
+            idx = np.random.choice(len(self.__q))
+            return self.__q.pop(idx)
+        else:
+            return self.__q.pop(0)
+
+
+    def length(self,):
+        return len(self.__q)
+
+class MacaronicState(object):
+    def __init__(self,
+                 macaronic_sentences,
+                 displayed_sentence_idx,
+                 model):
+        self.macaronic_sentences = macaronic_sentences
+        self.displayed_sentence_idx = displayed_sentence_idx
+        self.model = model
+        self.weights = None
+        self.score = 0.
+        self.terminal = False
+
+    def __str__(self,):
+        s = []
+        for sent_id, sent in enumerate(self.macaronic_sentences):
+            s.append(str(sent))
+            if sent_id == self.displayed_sentence_idx:
+                break
+        s.append('weight id:' + str(id(self.weights)))
+        s.append('terminal:' + str(self.terminal))
+        s.append('score:' + str(self.score))
+        return '\n'.join(s)
+
+    def current_sentence(self,):
+        if self.displayed_sentence_idx > -1:
+            return self.macaronic_sentences[self.displayed_sentence_idx]
+        else:
+            return None
+
+    def swap_counts(self,):
+        c = 0
+        u = set()
+        for i in range(self.displayed_sentence_idx + 1):
+            c += len(self.macaronic_sentences[i].l2_swapped_tokens)
+            u.update(self.macaronic_sentences[i].l2_swapped_types)
+        return c, len(u)
+
+    def possible_actions(self,):
+        s = self.current_sentence()
+        if s is None:
+            return []
+        elif self.terminal:
+            return []
+        else:
+            return [-1] + s.possible_swaps()
+
+    def copy(self,):
+        new_sentences = []
+        for ms in self.macaronic_sentences:
+            new_sentences.append(ms.copy())
+        c = MacaronicState(new_sentences,
+                           self.displayed_sentence_idx,
+                           self.model)
+        c.weights = self.weights
+        c.score = self.score
+        return c
+
+    def next_state(self, action, model_config_func, **kwargs):
+        c = self.copy()
+        current_displayed_config = c.current_sentence()
+        if action == -1:
+            new_score, new_weights = model_config_func(current_displayed_config,
+                                                       c.model,
+                                                       c.weights,
+                                                       kwargs['max_steps'],
+                                                       kwargs['improvement_threshold'])
+            c.weights = new_weights
+            swap_token_count, swap_type_count = c.swap_counts()
+            c.score = new_score - (kwargs['penalty'] * swap_type_count)
+            if c.displayed_sentence_idx + 1 < len(c.macaronic_sentences):
+                c.displayed_sentence_idx = self.displayed_sentence_idx + 1
+            else:
+                c.terminal = True
+            return c
+        else:
+            current_displayed_config.update_config(action)
+            new_score, _ = model_config_func(current_displayed_config,
+                                             c.model,
+                                             c.weights,
+                                             kwargs['max_steps'],
+                                             kwargs['improvement_threshold'])
+            c.weights = c.weights  # should not give new_weights here!
+            swap_token_count, swap_type_count = c.swap_counts()
+            c.score = new_score - (kwargs['penalty'] * swap_type_count)
+            return c
+
 
 class MacaronicSentence(object):
-    def __init__(self, tokens_l1, tokens_l2, int_l1, int_l2, swapped, swappable):
+    def __init__(self,
+                 tokens_l1, tokens_l2,
+                 int_l1, int_l2,
+                 swapped, swappable,
+                 l2_swapped_types, l2_swapped_tokens,
+                 swap_limit):
         self.__tokens_l1 = tokens_l1
         self.__tokens_l2 = tokens_l2
         self.__int_l1 = int_l1
         self.__int_l2 = int_l2
-        #self.__int_l1.flags.writeable = False
-        #self.__int_l2.flags.writeable = False
+        self.__swapped = swapped
+        self.__swappable = swappable  # set([idx for idx, tl2 in enumerate(tokens_l2)][1:-1])
+        self.__l2_swapped_types = l2_swapped_types
+        self.__l2_swapped_tokens = l2_swapped_tokens
+        self.swap_limit = swap_limit
         assert type(self.__tokens_l1) == list
         assert len(self.__tokens_l1) == len(self.__tokens_l2)
         self.len = len(self.__tokens_l2)
-        self.swapped = swapped
-        self.swappable = swappable  # set([idx for idx, tl2 in enumerate(tokens_l2)][1:-1])
+
+    @property
+    def l2_swapped_types(self,):
+        return self.__l2_swapped_types
+
+    @property
+    def l2_swapped_tokens(self,):
+        return self.__l2_swapped_tokens
 
     @property
     def int_l1(self,):
@@ -70,9 +191,27 @@ class MacaronicSentence(object):
     def tokens_l1(self,):
         return self.__tokens_l1
 
+    @property
+    def swapped(self,):
+        return self.__swapped
+
+    @property
+    def swappable(self,):
+        return self.__swappable
+    
+    def possible_swaps(self,):
+        if len(self.swapped) < self.len * self.swap_limit:
+            return list(self.swappable)
+        else:
+            return []
+
     def update_config(self, action):
-        self.swapped.add(action)
-        self.swappable.remove(action)
+        self.__swapped.add(action)
+        self.__swappable.remove(action)
+        l2_int_item = self.int_l2[:, action].item()
+        assert isinstance(l2_int_item, int)
+        self.__l2_swapped_types.add(l2_int_item)
+        self.__l2_swapped_tokens.append(l2_int_item)
         return self
 
     def copy(self,):
@@ -81,7 +220,10 @@ class MacaronicSentence(object):
                                            self.int_l1, #.clone(),  # same
                                            self.int_l2, #.clone(),  # same
                                            copy.deepcopy(self.swapped),  # this  does change so we deepcopy
-                                           copy.deepcopy(self.swappable))
+                                           copy.deepcopy(self.swappable),
+                                           copy.deepcopy(self.__l2_swapped_types),  # this  does change so we deepcopy
+                                           copy.deepcopy(self.__l2_swapped_tokens),
+                                           self.swap_limit)
         return macaronic_copy
 
     def display_macaronic(self,):
@@ -91,7 +233,6 @@ class MacaronicSentence(object):
 
     def __str__(self,):
         return self.display_macaronic()
-
 
 def prep_swap(macaronic_config):
     macaronic_d1 = macaronic_config.int_l1.clone()
@@ -114,8 +255,7 @@ def prep_swap(macaronic_config):
     macaronic_d1[indicator == 2] = macaronic_d2[indicator == 2]
     return macaronic_d1, indicator, flip_l2, flip_l2_offset, flip_l2_set
 
-
-def apply_swap(macaronic_config, model, weights, swap_penalty):
+def apply_swap(macaronic_config, model, weights, max_steps=1, improvement_threshold=0.01):
     macaronic_d, indicator, flip_l2, flip_l2_offset, flip_l2_set = prep_swap(macaronic_config)
     if model.is_cuda():
         macaronic_d = macaronic_d.cuda()
@@ -128,75 +268,64 @@ def apply_swap(macaronic_config, model, weights, swap_penalty):
     model.update_g_weights(weights)
     model.init_param_freeze(CBiLSTM.L2_LEARNING)
     model.init_optimizer(type='Adam')
-    #prev_loss = 100.
-    #num_steps = 0
-    #improvement = 1.
-    #while improvement >= improvement_threshold and num_steps < max_steps:
-    loss, grad_norm = model.do_backprop(var_batch, seen=(flip_l2, flip_l2_offset, flip_l2_set))
-    step_score_vocabtype = model.score_embeddings()
-    #improvement = step_score_vocabtype - prev_step_score_vocabtype
-    #improvement = prev_loss - loss
-    #prev_step_score_vocabtype = step_score_vocabtype
-    #prev_loss = loss
-    #num_steps += 1
-    #if verbose:
+    prev_loss = 100.
+    num_steps = 0
+    improvement = 1.
+    while num_steps < max_steps and improvement > improvement_threshold:
+        loss, grad_norm = model.do_backprop(var_batch, seen=(flip_l2, flip_l2_offset, flip_l2_set))
+        step_score_vocabtype = model.score_embeddings()
+        num_steps += 1
+        improvement = prev_loss - loss
+        prev_loss = loss
+        # print('loss', loss, 'num_steps', num_steps, 'improvement', improvement, 'grad_norm', grad_norm, 'weights', model.g_encoder.weight.sum().item())
     #    print(num_steps, 'step score', step_score_vocabtype, 'loss', loss)
     #step_score_vocabtype = model.score_embeddings(l2_key, l1_key)
-    print(step_score_vocabtype)
-    step_score_vocabtype = step_score_vocabtype - (swap_penalty * len(macaronic_config.swapped))
-    print(step_score_vocabtype)
     new_weights = model.g_encoder.weight.clone().detach().cpu()
     return step_score_vocabtype, new_weights
 
 
-def beam_search(init_config, init_weights, model, options):
-    penalty = options.penalty
-    model.update_g_weights(init_weights)
+def make_start_state(i2v, i2gv, init_weights, model, dl, **kwargs):
     score_0 = model.score_embeddings()
-    hyp_0 = Hyp(score_0, init_weights, init_config)
-    best_hyp = hyp_0
-    stack = [hyp_0]
-    swap_limit = int(len(init_config.tokens_l1) * options.swap_limit)
-    beam_size = options.beam_size
-    while len(stack) > 0:
-        curr_hyp = stack.pop(0)
-        if options.verbose:
-            print('curr_hyp', str(curr_hyp), curr_hyp.score)
-        if curr_hyp.score > best_hyp.score:
-            best_hyp = curr_hyp
-            if options.verbose:
-                print('best_hyp', str(best_hyp), best_hyp.score)
+    macaronic_sentences = []
+    for sent_idx, sent in enumerate(dl):
+        lens, l1_data, l2_data = sent
+        swapped = set([])
+        swappable = set(range(1, l1_data[0, :].size(0) - 1))
+        l1_tokens = [i2v[i.item()] for i in l1_data[0, :]]
+        l2_tokens = [i2gv[i.item()] for i in l2_data[0, :]]
+        ms = MacaronicSentence(l1_tokens, l2_tokens,
+                               l1_data, l2_data,
+                               swapped, swappable,
+                               set([]), [],
+                               kwargs['swap_limit'])
+        macaronic_sentences.append(ms)
+    state = MacaronicState(macaronic_sentences, 0, model)
+    state.weights = init_weights
+    state.score = score_0
+    return state
 
-        for a in curr_hyp.macaronic_sentence.swappable:
-            new_macaronic = curr_hyp.macaronic_sentence.copy()
-            new_macaronic.swapped.add(a)
-            new_macaronic.swappable.remove(a)
-            if len(new_macaronic.swapped) <= swap_limit:  # and optimistic_score > best_hyp.score:
-                # make new encoder and decoder with curr_hyp weights
-                # compute score
-                new_score, new_weights = apply_swap(new_macaronic,
-                                                    model,
-                                                    init_weights,
-                                                    penalty)
-                # save new weights into new hyp
-                new_hyp = Hyp(score=new_score,
-                              weights=new_weights,
-                              macaronic_sentence=new_macaronic)
 
-                stack.append(new_hyp)
-                print('stack len', len(stack))
-            else:
-                pass
-        stack.sort(key=attrgetter('score'), reverse=True)
-        stack = stack[:beam_size]  # keep best successors
-    if options.verbose:
-        print('stack empty...')
-    if options.verbose:
-        print('final best_hyp',  str(best_hyp), best_hyp.score)
-    final_weights = best_hyp.weights
-    final_score = best_hyp.score
-    final_config = best_hyp.macaronic_sentence
-    return final_config, final_weights, final_score
+def beam_search(init_state, **kwargs):
+    beam_size = kwargs['beam_size']
+    best_state = init_state
+
+    q = PriorityQ(beam_size)
+    q.append(init_state)
+    while q.length() > 0:
+        curr_state = q.pop(kwargs['stochastic'] == 1)
+        if kwargs['verbose']:
+            print('curr_state\n', str(curr_state))
+        if curr_state.score > best_state.score:
+            best_state = curr_state
+            if kwargs['verbose']:
+                print('best_state\n', str(best_state))
+        if curr_state.terminal:
+            return curr_state
+        for action in curr_state.possible_actions():
+            new_state = curr_state.next_state(action, apply_swap, **kwargs)
+            q.append(new_state)
+
+    return best_state
 
 
 if __name__ == '__main__':
@@ -219,6 +348,7 @@ if __name__ == '__main__':
     opt.add_argument('--gpuid', action='store', type=int, dest='gpuid', default=-1)
     opt.add_argument('--trained_model', action='store', dest='trained_model', required=True)
     opt.add_argument('--key', action='store', dest='key', required=True)
+    opt.add_argument('--stochastic', action='store', dest='stochastic', default=1, type=int, choices=[0,1])
     opt.add_argument('--beam_size', action='store', dest='beam_size', default=10, type=int)
     opt.add_argument('--swap_limit', action='store', dest='swap_limit', default=0.3, type=float)
     opt.add_argument('--max_steps', action='store', dest='max_steps', default=10, type=int)
@@ -252,6 +382,7 @@ if __name__ == '__main__':
     g_max_vocab = len(gv2i) if gv2i is not None else 0
     max_vocab = max(v_max_vocab, g_max_vocab)
     cbilstm = torch.load(options.trained_model, map_location=lambda storage, loc: storage)
+
     if isinstance(cbilstm.encoder, VarEmbedding):
         wr = cbilstm.encoder.word_representer
         we_size = wr.we_size
@@ -301,21 +432,8 @@ if __name__ == '__main__':
         weights = cbilstm.g_encoder.weight.clone().detach().cpu()
     else:
         weights = cbilstm.g_encoder.weight.clone().detach()
-
-    for sent_idx, sent in enumerate(dataloader):
-        lens, l1_data, l2_data = sent
-        # setup stack
-        swapped = set([])
-        swappable = set(range(1, l1_data[0, :].size(0) - 1))
-        l1_tokens = [i2v[i.item()] for i in l1_data[0, :]]
-        l2_tokens = [i2gv[i.item()] for i in l2_data[0, :]]
-        macaronic_0 = MacaronicSentence(l1_tokens, l2_tokens, l1_data, l2_data, swapped, swappable)
-        config, weights, score = beam_search(macaronic_0, weights, cbilstm, options)
-        print('completed ', sent_idx, 'score ', score)
-        print(str(config))
-        macaronic_sents.append((config, score))
-        pdb.set_trace()
-
+    kwargs = vars(options)
+    start_state = make_start_state(i2v, i2gv, weights, cbilstm, dataloader, **kwargs)
+    best_state = beam_search(start_state, **kwargs)
     print('search completed')
-    for sent, score in macaronic_sents:
-        print(str(sent) + '\t' + str(score))
+    print(str(best_state))
