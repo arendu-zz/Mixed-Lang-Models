@@ -6,6 +6,8 @@ from operator import attrgetter
 import pickle
 import sys
 import torch
+import random
+import pdb
 
 from model import CBiLSTM
 from model import VarEmbedding
@@ -20,6 +22,8 @@ from utils import parallel_collate
 from utils import TEXT_EFFECT
 import time
 
+global NEXT_SENT
+NEXT_SENT = (-1, None)
 
 global PAD, EOS, BOS, UNK
 PAD = '<PAD>'
@@ -51,7 +55,7 @@ class PriorityQ(object):
 
     def pop(self, random=False):
         if random:
-            idx = np.random.choice(len(self.__q))
+            idx = random.choice(range(len(self.__q)))
             return self.__q.pop(idx)
         else:
             return self.__q.pop(0)
@@ -64,10 +68,12 @@ class MacaronicState(object):
     def __init__(self,
                  macaronic_sentences,
                  displayed_sentence_idx,
-                 model):
+                 model,
+                 binary_branching=0):
         self.macaronic_sentences = macaronic_sentences
         self.displayed_sentence_idx = displayed_sentence_idx
         self.model = model
+        self.binary_branching = binary_branching
         self.weights = None
         self.score = 0.
         self.terminal = False
@@ -78,9 +84,10 @@ class MacaronicState(object):
             s.append(str(sent))
             if sent_id == self.displayed_sentence_idx:
                 break
-        s.append('weight id:' + str(id(self.weights)))
-        s.append('terminal:' + str(self.terminal))
-        s.append('score:' + str(self.score))
+        s.append('possible_children:' + str(len(self.possible_actions())))
+        s.append('weightid         :' + str(id(self.weights)))
+        s.append('is_terminal      :' + str(self.terminal))
+        s.append('score            :' + str(self.score))
         return '\n'.join(s)
 
     def current_sentence(self,):
@@ -104,7 +111,14 @@ class MacaronicState(object):
         elif self.terminal:
             return []
         else:
-            return [-1] + s.possible_swaps()
+            if self.binary_branching == 1:
+                if len(s.possible_swaps()) > 0:
+                    min_swappable = min(s.possible_swaps())
+                    return [(min_swappable, True), (min_swappable, False)]
+                else:
+                    return [NEXT_SENT]
+            else:
+                return [NEXT_SENT] + [(i, True) for i in s.possible_swaps()]
 
     def copy(self,):
         new_sentences = []
@@ -112,15 +126,17 @@ class MacaronicState(object):
             new_sentences.append(ms.copy())
         c = MacaronicState(new_sentences,
                            self.displayed_sentence_idx,
-                           self.model)
+                           self.model,
+                           self.binary_branching)
         c.weights = self.weights
         c.score = self.score
         return c
 
     def next_state(self, action, model_config_func, **kwargs):
+        assert isinstance(action, tuple)
         c = self.copy()
         current_displayed_config = c.current_sentence()
-        if action == -1:
+        if action == NEXT_SENT:
             new_score, new_weights = model_config_func(current_displayed_config,
                                                        c.model,
                                                        c.weights,
@@ -151,7 +167,7 @@ class MacaronicSentence(object):
     def __init__(self,
                  tokens_l1, tokens_l2,
                  int_l1, int_l2,
-                 swapped, swappable,
+                 swapped, not_swapped, swappable,
                  l2_swapped_types, l2_swapped_tokens,
                  swap_limit):
         self.__tokens_l1 = tokens_l1
@@ -159,6 +175,7 @@ class MacaronicSentence(object):
         self.__int_l1 = int_l1
         self.__int_l2 = int_l2
         self.__swapped = swapped
+        self.__not_swapped = not_swapped
         self.__swappable = swappable  # set([idx for idx, tl2 in enumerate(tokens_l2)][1:-1])
         self.__l2_swapped_types = l2_swapped_types
         self.__l2_swapped_tokens = l2_swapped_tokens
@@ -196,9 +213,13 @@ class MacaronicSentence(object):
         return self.__swapped
 
     @property
+    def not_swapped(self,):
+        return self.__not_swapped
+
+    @property
     def swappable(self,):
         return self.__swappable
-    
+
     def possible_swaps(self,):
         if len(self.swapped) < self.len * self.swap_limit:
             return list(self.swappable)
@@ -206,12 +227,17 @@ class MacaronicSentence(object):
             return []
 
     def update_config(self, action):
-        self.__swapped.add(action)
-        self.__swappable.remove(action)
-        l2_int_item = self.int_l2[:, action].item()
-        assert isinstance(l2_int_item, int)
-        self.__l2_swapped_types.add(l2_int_item)
-        self.__l2_swapped_tokens.append(l2_int_item)
+        assert isinstance(action, tuple)
+        token_idx, is_swap = action
+        self.__swappable.remove(token_idx)
+        if is_swap:
+            self.__swapped.add(token_idx)
+            l2_int_item = self.int_l2[:, token_idx].item()
+            assert isinstance(l2_int_item, int)
+            self.__l2_swapped_types.add(l2_int_item)
+            self.__l2_swapped_tokens.append(l2_int_item)
+        else:
+            self.__not_swapped.add(token_idx)
         return self
 
     def copy(self,):
@@ -220,14 +246,23 @@ class MacaronicSentence(object):
                                            self.int_l1, #.clone(),  # same
                                            self.int_l2, #.clone(),  # same
                                            copy.deepcopy(self.swapped),  # this  does change so we deepcopy
+                                           copy.deepcopy(self.not_swapped),
                                            copy.deepcopy(self.swappable),
                                            copy.deepcopy(self.__l2_swapped_types),  # this  does change so we deepcopy
                                            copy.deepcopy(self.__l2_swapped_tokens),
                                            self.swap_limit)
         return macaronic_copy
 
+    def color_it(self, w1, w2, w_idx):
+        if w_idx in self.swapped:
+            return TEXT_EFFECT.CYAN + w2 + TEXT_EFFECT.END
+        elif w_idx in self.not_swapped:
+            return TEXT_EFFECT.YELLOW + w1 + TEXT_EFFECT.END
+        else:
+            return w1
+
     def display_macaronic(self,):
-        s = [tl1 if idx not in self.swapped else TEXT_EFFECT.CYAN + tl2 + TEXT_EFFECT.END
+        s = [self.color_it(tl1, tl2, idx)
              for idx, tl1, tl2 in zip(range(self.len), self.tokens_l1, self.tokens_l2)]
         return ' '.join(s)
 
@@ -290,16 +325,17 @@ def make_start_state(i2v, i2gv, init_weights, model, dl, **kwargs):
     for sent_idx, sent in enumerate(dl):
         lens, l1_data, l2_data = sent
         swapped = set([])
+        not_swapped = set([])
         swappable = set(range(1, l1_data[0, :].size(0) - 1))
         l1_tokens = [i2v[i.item()] for i in l1_data[0, :]]
         l2_tokens = [i2gv[i.item()] for i in l2_data[0, :]]
         ms = MacaronicSentence(l1_tokens, l2_tokens,
                                l1_data, l2_data,
-                               swapped, swappable,
+                               swapped, not_swapped, swappable,
                                set([]), [],
                                kwargs['swap_limit'])
         macaronic_sentences.append(ms)
-    state = MacaronicState(macaronic_sentences, 0, model)
+    state = MacaronicState(macaronic_sentences, 0, model, kwargs['binary_branching'])
     state.weights = init_weights
     state.score = score_0
     return state
@@ -313,17 +349,18 @@ def beam_search(init_state, **kwargs):
     q.append(init_state)
     while q.length() > 0:
         curr_state = q.pop(kwargs['stochastic'] == 1)
-        if kwargs['verbose']:
+        if 'verbose' in kwargs and kwargs['verbose']:
             print('curr_state\n', str(curr_state))
-        if curr_state.score > best_state.score:
-            best_state = curr_state
-            if kwargs['verbose']:
-                print('best_state\n', str(best_state))
+        #if curr_state.score > best_state.score:
+        #    best_state = curr_state
+        #if 'verbose' in kwargs and kwargs['verbose']:
+        #        print('best_state\n', str(best_state))
         if curr_state.terminal:
             return curr_state
         for action in curr_state.possible_actions():
             new_state = curr_state.next_state(action, apply_swap, **kwargs)
-            q.append(new_state)
+            if new_state.displayed_sentence_idx - init_state.displayed_sentence_idx < kwargs['max_search_depth']:
+                q.append(new_state)
 
     return best_state
 
@@ -331,6 +368,8 @@ def beam_search(init_state, **kwargs):
 if __name__ == '__main__':
     print(sys.stdout.encoding)
     torch.manual_seed(1234)
+    random.seed(1234)
+    np.random.seed(1234)
     opt = argparse.ArgumentParser(description="write program description here")
     # insert options here
     opt.add_argument('--data_dir', action='store', dest='data_folder', required=True)
@@ -348,9 +387,11 @@ if __name__ == '__main__':
     opt.add_argument('--gpuid', action='store', type=int, dest='gpuid', default=-1)
     opt.add_argument('--trained_model', action='store', dest='trained_model', required=True)
     opt.add_argument('--key', action='store', dest='key', required=True)
-    opt.add_argument('--stochastic', action='store', dest='stochastic', default=1, type=int, choices=[0,1])
+    opt.add_argument('--stochastic', action='store', dest='stochastic', default=0, type=int, choices=[0, 1])
     opt.add_argument('--beam_size', action='store', dest='beam_size', default=10, type=int)
     opt.add_argument('--swap_limit', action='store', dest='swap_limit', default=0.3, type=float)
+    opt.add_argument('--max_search_depth', action='store', dest='max_search_depth', default=1000, type=int)
+    opt.add_argument('--binary_branching', action='store', dest='binary_branching', default=0, type=int, choices=[0, 1])
     opt.add_argument('--max_steps', action='store', dest='max_steps', default=10, type=int)
     opt.add_argument('--improvement', action='store', dest='improvement_threshold', default=0.01, type=float)
     opt.add_argument('--penalty', action='store', dest='penalty', default=0.0, type=float)

@@ -283,7 +283,7 @@ class CBiLSTM(nn.Module):
                  encoder, decoder,
                  g_encoder, g_decoder,
                  mode,
-                 dropout=0.3, max_grad_norm=1.0):
+                 dropout=0.3, max_grad_norm=10.0):
         super(CBiLSTM, self).__init__()
         self.encoder = encoder
         self.decoder = decoder
@@ -312,7 +312,7 @@ class CBiLSTM(nn.Module):
         if type == 'Adam':
             self.optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()))
         elif type == 'SGD':
-            self.optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.parameters()), lr=1.)
+            self.optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.parameters()), lr=1.0)
         elif type == 'LBFGS':
             self.optimizer = torch.optim.LBFGS(filter(lambda p: p.requires_grad, self.parameters()),
                                                max_iter=3, history_size=2)
@@ -325,10 +325,15 @@ class CBiLSTM(nn.Module):
 
     def init_key(self,):
         if self.l1_key is not None:
-            self.l1_key = self.l1_key.cuda()
+            if self.is_cuda():
+                self.l1_key = self.l1_key.cuda()
+            else:
+                pass
         if self.l2_key is not None:
-            self.l2_key = self.l2_key.cuda()
-
+            if self.is_cuda():
+                self.l2_key = self.l2_key.cuda()
+            else:
+                pass
 
     def init_cuda(self,):
         self = self.cuda()
@@ -481,30 +486,32 @@ class CBiLSTM(nn.Module):
 
     def do_backprop(self, batch, seen=None, total_batches=None):
         self.optimizer.zero_grad()
-        l = self(batch, seen)
+        _l = self(batch, seen)
         if isinstance(self.encoder, VariationalEmbeddings):
-            #print('encoder mu', self.encoder.mean[10].sum())
-            #print('decoder mu', self.decoder.mean[10].sum())
-            #print('encoder rho', self.encoder.rho[10].sum())
-            #print('decoder rho', self.decoder.rho[10].sum())
-            #print('\nlpw', self.encoder.log_p_w.item())
-            #print('lqw', self.encoder.log_q_w.item())
+            # print('encoder mu', self.encoder.mean[10].sum())
+            # print('decoder mu', self.decoder.mean[10].sum())
+            # print('encoder rho', self.encoder.rho[10].sum())
+            # print('decoder rho', self.decoder.rho[10].sum())
+            # print('\nlpw', self.encoder.log_p_w.item())
+            # print('lqw', self.encoder.log_q_w.item())
             kl_loss = (1. / total_batches) * (self.encoder.log_q_w - self.encoder.log_p_w)
-            #print('kl', kl_loss.item())
-            #print('l', l.item())
-            l += kl_loss
-            #print('full', l.item())
-        l.backward()
-        #print(self.encoder.weight[10], self.encoder.weight[10].sum())
+            # print('kl', kl_loss.item())
+            # print('l', l.item())
+            _l += kl_loss
+            # print('full', l.item())
+        _l.backward()
+        # print(self.encoder.weight[10], self.encoder.weight[10].sum())
+        #grad_sum = sum([p.grad.data.sum().item() for p in self.parameters() if p.requires_grad])
         grad_norm = torch.nn.utils.clip_grad_norm_(filter(lambda p: p.requires_grad, self.parameters()),
                                                    self.max_grad_norm)
-        if math.isnan(grad_norm):
-            print('skipping update grad_norm is nan')
+        if math.isnan(grad_norm.item()):
+            print('skipping update grad_norm is nan!')
         else:
             self.optimizer.step()
-        loss = l.item()
-        del l, batch
-        return loss, grad_norm
+        loss = _l.item()
+        #del _l
+        #del batch
+        return loss, grad_norm.item()
 
     def save_model(self, path):
         torch.save(self, path)
