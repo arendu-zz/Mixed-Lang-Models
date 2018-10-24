@@ -138,8 +138,15 @@ if __name__ == '__main__':
         l1_tokens = [i2v[i.item()] for i in l1_data[0, :]]
         l2_tokens = [i2gv[i.item()] for i in l2_data[0, :]]
         swapped = set([])
+        not_swapped = set([])
         swappable = set(range(1, l1_data[0, :].size(0) - 1))
-        macaronic_0 = MacaronicSentence(l1_tokens, l2_tokens, l1_data.clone(), l2_data.clone(), swapped, swappable)
+        macaronic_0 = MacaronicSentence(l1_tokens,
+                                        l2_tokens,
+                                        l1_data.clone(),
+                                        l2_data.clone(),
+                                        swapped, not_swapped, swappable,
+                                        set([]), [],
+                                        1.0)
         go_next = False
         while not go_next:
             l1_str = ' '.join([str(_idx) + ':' + i for _idx, i in enumerate(macaronic_0.tokens_l1)][1:-1])
@@ -149,12 +156,16 @@ if __name__ == '__main__':
             swap_str = ' '.join([(i2v[l1_data[0, i].item()]
                                  if i not in swaps_selected else (TEXT_EFFECT.UNDERLINE + i2gv[l2_data[0, i].item()] + TEXT_EFFECT.END))
                                  for i in range(1, l1_data.size(1) - 1)])
-            new_macaronic = macaronic_0.copy() #.deepcopy(curr_hyp.macaronic_sentence)
+            new_macaronic = macaronic_0.copy()
             for a in swaps_selected:
-                new_macaronic.swapped.add(a)
-                new_macaronic.swappable.remove(a)
+                new_macaronic.update_config((a, True))
             if options.verbose:
                 print(new_macaronic)
+            init_score, _ = apply_swap(macaronic_0,
+                                       cbilstm,
+                                       sent_init_weights,
+                                       penalty)
+            print('init score', init_score)
             swap_score, new_weights = apply_swap(new_macaronic,
                                                  cbilstm,
                                                  sent_init_weights,
