@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 __author__ = 'arenduchintala'
 import math
+import pdb
 import torch
 import torch.nn as nn
 import numpy as np
@@ -279,27 +280,39 @@ class CBiLSTM(nn.Module):
     L12_LEARNING = 'L12_LEARNING'  # updates both l1 params and l2 params (novel vocab embeddings)
     L2_LEARNING = 'L2_LEARNING'  # update only l2 params
 
-    def __init__(self, input_size,
+    def __init__(self, input_size, rnn_size, layers,
                  encoder, decoder,
                  g_encoder, g_decoder,
                  mode,
-                 dropout=0.3, max_grad_norm=10.0):
+                 dropout=0.3,
+                 max_grad_norm=10.0,
+                 size_average=False):
         super(CBiLSTM, self).__init__()
         self.encoder = encoder
         self.decoder = decoder
         self.g_encoder = g_encoder
         self.g_decoder = g_decoder
-        self.dropout = nn.Dropout(dropout)
+        self.dropout_val = dropout
+        self.dropout = nn.Dropout(self.dropout_val)
         self.max_grad_norm = max_grad_norm
         self.input_size = input_size
-        assert self.input_size % 2 == 0
-        self.rnn_size = self.input_size // 2
-        self.rnn = nn.LSTM(self.input_size, self.rnn_size, dropout=dropout,
-                           batch_first=True,
-                           bidirectional=True)
+        self.rnn_size = rnn_size
+        # self.rnn = nn.LSTM(self.input_size, self.rnn_size, dropout=dropout,
+        #                   num_layers=layers,
+        #                   batch_first=True,
+        #                   bidirectional=True)
+        self.fwd_rnn = nn.LSTM(self.input_size, self.rnn_size, dropout=dropout,
+                               num_layers=layers,
+                               batch_first=True,
+                               bidirectional=False)
+        self.bwd_rnn = nn.LSTM(self.input_size, self.rnn_size, dropout=dropout,
+                               num_layers=layers,
+                               batch_first=True,
+                               bidirectional=False)
+
+        self.linear = nn.Linear(2 * self.rnn_size, self.input_size)
         self.init_param_freeze(mode)
-        self.loss = torch.nn.CrossEntropyLoss(size_average=False, reduce=True, ignore_index=0)
-        self.optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()))
+        self.loss = torch.nn.CrossEntropyLoss(size_average=size_average, reduce=True, ignore_index=0)
         self.eos_sym = None
         self.bos_sym = None
         #self.z = Variable(torch.zeros(1, 1, self.rnn_size), requires_grad=False)
@@ -307,17 +320,18 @@ class CBiLSTM(nn.Module):
         # .expand(batch_size, 1, self.rnn_size), requires_grad=False)
         self.l1_key = None
         self.l2_key = None
+        self.init_optimizer(type='SGD')
 
     def init_optimizer(self, type='Adam'):
+        #grad_params = [p for p in self.parameters() if p.requires_grad]
+        #total_params = [p for p in self.parameters()]
+        #print(str(len(grad_params)) + '/' + str(len(total_params)) + ' params requires_grad')
         if type == 'Adam':
             self.optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()))
         elif type == 'SGD':
             self.optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.parameters()), lr=1.0)
-        elif type == 'LBFGS':
-            self.optimizer = torch.optim.LBFGS(filter(lambda p: p.requires_grad, self.parameters()),
-                                               max_iter=3, history_size=2)
         else:
-            raise NotImplementedError("unknonw optimizer option")
+            raise NotImplementedError("unknown optimizer option")
 
     def set_key(self, l1_key, l2_key):
         self.l1_key = l1_key
@@ -342,15 +356,11 @@ class CBiLSTM(nn.Module):
     def init_param_freeze(self, mode):
         self.mode = mode
         if self.mode == CBiLSTM.L12_LEARNING or self.mode == CBiLSTM.L2_LEARNING:
+            self.dropout = nn.Dropout(0.0)
             assert self.g_encoder is not None
             assert self.g_decoder is not None
-            for p in self.encoder.parameters():
+            for p in self.parameters():
                 p.requires_grad = False
-            for p in self.decoder.parameters():
-                p.requires_grad = False
-            for p in self.rnn.parameters():
-                p.requires_grad = False
-            #print(self.mode, 'L1 Parameters frozen')
             for p in self.g_encoder.parameters():
                 p.requires_grad = True
             for p in self.g_decoder.parameters():
@@ -359,27 +369,25 @@ class CBiLSTM(nn.Module):
                 self.g_encoder.word_representer.set_extra_feat_learnable(True)
                 assert isinstance(self.g_decoder, VarLinear)
                 assert self.g_decoder.word_representer.is_extra_feat_learnable
+            # print('L2_LEARNING, L1 Parameters frozen')
         elif self.mode == CBiLSTM.L1_LEARNING:
+            self.dropout = nn.Dropout(0.0)
+            for p in self.parameters():
+                p.requires_grad = True
             if self.g_encoder is not None:
                 for p in self.g_encoder.parameters():
                     p.requires_grad = False
             if self.g_decoder is not None:
                 for p in self.g_decoder.parameters():
                     p.requires_grad = False
-            print('L1_LEARNING, L2 Parameters frozen')
-            for p in self.encoder.parameters():
-                p.requires_grad = True
-            for p in self.decoder.parameters():
-                p.requires_grad = True
-            for p in self.rnn.parameters():
-                p.requires_grad = True
+            # print('L1_LEARNING, L2 Parameters frozen')
             if isinstance(self.encoder, VarEmbedding):
                 self.encoder.word_representer.set_extra_feat_learnable(False)
                 assert isinstance(self.decoder, VarLinear)
                 assert not self.decoder.word_representer.is_extra_feat_learnable
 
     def is_cuda(self,):
-        return self.rnn.weight_hh_l0.is_cuda
+        return self.fwd_rnn.weight_hh_l0.is_cuda
 
     def set_reset_weight(self,):
         self.reset_weight = self.g_encoder.weight.detach().clone()
@@ -405,88 +413,109 @@ class CBiLSTM(nn.Module):
             # ps = prob_score_embeddings(l2_embedding, l1_embedding, l2_key, l1_key)
             return s.item()
 
-    def forward(self, batch, seen=None):
-        lengths, data, ind = batch
+    def forward(self, batch, l2_seen=None):
+        lengths, l1_data, l2_data, ind = batch
+        rev_idx_col = torch.zeros(l1_data.size(0), l1_data.size(1)).long()
+        for _idx, l in enumerate(lengths):
+            rev_idx_col[_idx, :] = torch.LongTensor(list(range(l - 1, -1, -1)) + list(range(l, lengths[0])))
+
+        rev_idx_row = torch.arange(len(lengths)).long()
+        rev_idx_row = rev_idx_row.unsqueeze(1).expand(l1_data.shape[0], l1_data.shape[1])
+        #if data.is_cuda:
+        #    rev_idx_row = rev_idx_row.cuda()
         v_ind = ind % 2
         g_ind = ind - 1
         g_ind[g_ind < 0] = 0
-        if seen is not None:
-            seen, seen_offset, seen_set = seen
+        #if seen is not None:
+        #    seen, seen_offset, seen_set = seen
         # if self.is_cuda():
         #     data = data.cuda()
-        batch_size = data.size(0)
+        batch_size = l1_data.size(0)
         # max_seq_len = data.size(1)
-        assert data.dim() == 2
 
-        # data = (batch_size x seq_len)
-        v_encoded = self.encoder(data)
-        v_inp_ind = v_ind.unsqueeze(2).expand(v_ind.size(0), v_ind.size(1), v_encoded.size(2)).float()
-        if self.mode == CBiLSTM.L12_LEARNING:
-            g_encoded = self.g_encoder(data)
-            g_inp_ind = g_ind.unsqueeze(2).expand(g_ind.size(0), g_ind.size(1), g_encoded.size(2)).float()
-            encoded = v_inp_ind * v_encoded + g_inp_ind * g_encoded
+        # l1_data = (batch_size x seq_len)
+        # l2_data = (batch_size x seq_len)
+        if self.mode == CBiLSTM.L2_LEARNING:
+            l1_encoded = self.encoder(l1_data)
+            l2_encoded = self.g_encoder(l2_data)
+            g_inp_ind = g_ind.unsqueeze(2).expand(g_ind.size(0), g_ind.size(1), l2_encoded.size(2)).float()
+            v_inp_ind = v_ind.unsqueeze(2).expand(v_ind.size(0), v_ind.size(1), l1_encoded.size(2)).float()
+            tmp_encoded = v_inp_ind * l1_encoded + g_inp_ind * l2_encoded
+            encoded = l1_encoded * v_ind.unsqueeze(2).expand_as(l1_encoded).float() + \
+                l2_encoded * g_ind.unsqueeze(2).expand_as(l2_encoded).float()
+            assert (encoded - tmp_encoded).sum().item() == 0
+            encoded = self.dropout(encoded)
+        elif self.mode == CBiLSTM.L12_LEARNING:
+            raise NotImplementedError("no longer supported")
+            l1_encoded = self.encoder(l1_data)
+            l2_encoded = self.g_encoder(l2_data)
+            g_inp_ind = g_ind.unsqueeze(2).expand(g_ind.size(0), g_ind.size(1), l2_encoded.size(2)).float()
+            v_inp_ind = v_ind.unsqueeze(2).expand(v_ind.size(0), v_ind.size(1), l1_encoded.size(2)).float()
+            tmp_encoded = v_inp_ind * l1_encoded + g_inp_ind * l2_encoded
+            encoded = l1_encoded * v_ind.unsqueeze(2).expand_as(l1_encoded).float() + \
+                l2_encoded * g_ind.unsqueeze(2).expand_as(l2_encoded).float()
+            assert (encoded - tmp_encoded).sum().item() == 0
             encoded = self.dropout(encoded)
         else:
-            encoded = self.dropout(v_encoded)
+            l1_encoded = self.encoder(l1_data)
+            encoded = self.dropout(l1_encoded)
 
-        packed_encoded = pack(encoded, lengths, batch_first=True)
+        # bwd_encoded = torch.zeros_like(fwd_encoded)
+        # for _idx, l in enumerate(lengths):
+        #    bwd_encoded[_idx, :, :] = fwd_encoded[_idx, rev_idx_col[_idx, :], :]
+
+        rev_encoded = encoded[rev_idx_row, rev_idx_col, :]
+        # assert (tmp - bwd_encoded).sum().item() == 0
+
+        fwd_packed_encoded = pack(encoded, lengths, batch_first=True)
+        bwd_packed_encoded = pack(rev_encoded, lengths, batch_first=True)
         # encoded = (batch_size x seq_len x embedding_size)
-        packed_hidden, (h_t, c_t) = self.rnn(packed_encoded)
-        hidden, lengths = unpack(packed_hidden, batch_first=True)
+        #packed_hidden, (h_t, c_t) = self.rnn(packed_encoded)
+        #hidden, lengths = unpack(packed_hidden, batch_first=True)
+        fwd_packed_hidden, (fwd_h_t, fwd_c_t) = self.fwd_rnn(fwd_packed_encoded)
+        fwd_hidden, fwd_lengths = unpack(fwd_packed_hidden, batch_first=True)
 
+        bwd_packed_hidden, (bwd_h_t, bwd_c_t) = self.bwd_rnn(bwd_packed_encoded)
+        bwd_hidden, bwd_lengths = unpack(bwd_packed_hidden, batch_first=True)
+        # rev_bwd_hidden = torch.zeros_like(bwd_hidden)
+        # for _idx, l in enumerate(lengths):
+        #    rev_bwd_hidden[_idx, :, :] = bwd_hidden[_idx, rev_idx_col[_idx, :], :]
+
+        rev_bwd_hidden = bwd_hidden[rev_idx_row, rev_idx_col, :]
+        #assert(tmp - rev_bwd_hidden).sum() == 0
+
+        # hidden = (batch_size x seq_len x rnn_size)
         z = self.z.expand(batch_size, 1, self.rnn_size)
-        fwd_hidden = torch.cat((z, hidden[:, :-1, :self.rnn_size]), dim=1)
-        bwd_hidden = torch.cat((hidden[:, 1:, self.rnn_size:], z), dim=1)
+        fwd_hidden = torch.cat((z, fwd_hidden[:, :-1, :]), dim=1)
+        rev_bwd_hidden = torch.cat((rev_bwd_hidden[:, 1:, :], z), dim=1)
         # bwd_hidden = (batch_size x seq_len x rnn_size)
         # fwd_hidden = (batch_size x seq_len x rnn_size)
-        final_hidden = torch.cat((fwd_hidden, bwd_hidden), dim=2)
+        final_hidden = torch.cat((fwd_hidden, rev_bwd_hidden), dim=2)
         final_hidden = self.dropout(final_hidden)
+        final_hidden = self.linear(final_hidden)
 
-        v_out = self.decoder(final_hidden)
-        # v_out = (batch_size, seq_len, v_vocab_size)
-        if self.mode == CBiLSTM.L12_LEARNING or self.mode == CBiLSTM.L2_LEARNING:
-            g_out = self.g_decoder(final_hidden)
-        # g_out = (batch_size, seq_len, g_vocab_size)
-
-        # flatten tensors for loss computation
         if self.mode == CBiLSTM.L1_LEARNING:
-            data = data.view(-1)
-            v_ind = v_ind.view(-1)
-            d_idx = torch.arange(data.size(0)).type_as(data.data).long()
-            v_idx = d_idx[v_ind.data == 1]
-            v_data = data[v_idx]
-            v_out = v_out.view(-1, v_out.size(2))[v_idx, :]
-            loss = self.loss(v_out, v_data)
-
-        if self.mode == CBiLSTM.L12_LEARNING:
-            data = data.view(-1)
-            v_ind = v_ind.view(-1)
-            d_idx = torch.arange(data.size(0)).type_as(data.data).long()
-            v_idx = d_idx[v_ind.data == 1]
-            v_data = data[v_idx]
-            v_out = v_out.view(-1, v_out.size(2))[v_idx, :]
-            loss = self.loss(v_out, v_data)
-
-            g_ind = g_ind.view(-1)
-            g_idx = d_idx[g_ind.data == 1]
-            if g_idx.dim() > 0:
-                g_data = data[g_idx]
-                g_out = g_out.view(-1, g_out.size(2))[g_idx, :]
-                loss += self.loss(g_out, g_data)
-
-        if self.mode == CBiLSTM.L2_LEARNING:
-            all_out = torch.cat([v_out, g_out[:, :, seen_set]], dim=2)
-            all_data = data.clone()
-            all_data[g_ind == 1] = seen_offset + v_out.size(2)
-            all_data = all_data.view(-1)
-            all_out = all_out.view(-1, all_out.size(2))
-            loss = self.loss(all_out, all_data)
-
+            l1_final_hidden = final_hidden[v_ind == 1, :]
+            l1_out = self.decoder(l1_final_hidden)
+            loss = self.loss(l1_out, l1_data[v_ind == 1])
+        elif self.mode == CBiLSTM.L2_LEARNING or self.mode == CBiLSTM.L12_LEARNING:
+            l1_final_hidden = final_hidden[v_ind == 1, :]
+            l1_out = self.decoder(l1_final_hidden)
+            l1_loss = self.loss(l1_out, l1_data[v_ind == 1])
+            l2_final_hidden = final_hidden[v_ind == 0, :]
+            if l2_final_hidden.shape[0] > 0:
+                l2_out = self.g_decoder(l2_final_hidden)
+                l2_loss = self.loss(l2_out, l2_data[v_ind == 0])
+                loss = l1_loss + l2_loss
+            else:
+                loss = l1_loss
+        else:
+            raise BaseException("unknown learning type")
         return loss
 
-    def do_backprop(self, batch, seen=None, total_batches=None):
+    def do_backprop(self, batch, l2_seen=None, total_batches=None):
         self.optimizer.zero_grad()
-        _l = self(batch, seen)
+        _l = self(batch, l2_seen=l2_seen)
         if isinstance(self.encoder, VariationalEmbeddings):
             # print('encoder mu', self.encoder.mean[10].sum())
             # print('decoder mu', self.decoder.mean[10].sum())
@@ -499,19 +528,25 @@ class CBiLSTM(nn.Module):
             # print('l', l.item())
             _l += kl_loss
             # print('full', l.item())
+
         _l.backward()
+
+        if self.mode == CBiLSTM.L2_LEARNING:
+                keep_grad = torch.zeros_like(self.g_encoder.weight.grad)
+                keep_grad[l2_seen, :] = 1.0
+                self.g_encoder.weight.grad *= keep_grad
         # print(self.encoder.weight[10], self.encoder.weight[10].sum())
         #grad_sum = sum([p.grad.data.sum().item() for p in self.parameters() if p.requires_grad])
         grad_norm = torch.nn.utils.clip_grad_norm_(filter(lambda p: p.requires_grad, self.parameters()),
                                                    self.max_grad_norm)
-        if math.isnan(grad_norm.item()):
+        if math.isnan(grad_norm):
             print('skipping update grad_norm is nan!')
         else:
             self.optimizer.step()
         loss = _l.item()
         #del _l
         #del batch
-        return loss, grad_norm.item()
+        return loss, grad_norm
 
     def save_model(self, path):
         torch.save(self, path)

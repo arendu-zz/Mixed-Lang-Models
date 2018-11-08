@@ -36,7 +36,7 @@ def score_embeddings(l2_embedding, l1_embedding, l2_key, l1_key):
     l1_sub = l1_embedding[l1_key]
     cs = batch_cosine_sim(l2_sub, l1_sub)  # _embedding, l1_embedding)
     cs = cs.diag()
-    cs = torch.nn.functional.relu(cs)
+    cs = torch.nn.functional.relu(cs - 0.0) ** 2
     #scores = sigmoid(cs, 10)
     #print(cs.diag().view(-1).cpu().numpy(), score)
     return cs.sum()
