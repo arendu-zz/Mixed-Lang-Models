@@ -1,17 +1,19 @@
 #!/usr/bin/env python
 __author__ = 'arenduchintala'
 import math
-import pdb
 import torch
 import torch.nn as nn
 import numpy as np
 
 from torch.nn.utils.rnn import pack_padded_sequence as pack
 from torch.nn.utils.rnn import pad_packed_sequence as unpack
+from utils.utils import SPECIAL_TOKENS
 
 from rewards import batch_cosine_sim
 from rewards import score_embeddings
 from rewards import prob_score_embeddings
+
+from attn_modules.transformer_encoder_layer import TransformerEncoderLayer
 
 
 def get_unsort_idx(sort_idx):
@@ -275,61 +277,100 @@ class VariationalLinear(nn.Module):
             raise BaseException("data should be at least 2 dimensional")
 
 
-class CBiLSTM(nn.Module):
+class CEncoderModel(nn.Module):
     L1_LEARNING = 'L1_LEARNING'  # updates only l1 params i.e. base language model
     L12_LEARNING = 'L12_LEARNING'  # updates both l1 params and l2 params (novel vocab embeddings)
     L2_LEARNING = 'L2_LEARNING'  # update only l2 params
 
-    def __init__(self, input_size, rnn_size, layers,
-                 encoder, decoder,
-                 g_encoder, g_decoder,
+    def __init__(self,
+                 encoder,
+                 decoder,
+                 l2_encoder,
+                 l2_decoder,
                  mode,
-                 dropout=0.3,
-                 max_grad_norm=10.0,
+                 l1_dict,
+                 l2_dict,
+                 dropout=0.2,
+                 max_grad_norm=10,
                  size_average=False):
-        super(CBiLSTM, self).__init__()
+        super().__init__()
+        self.mode = mode
+        self.l1_dict = l1_dict
+        self.l2_dict = l2_dict
         self.encoder = encoder
         self.decoder = decoder
-        self.g_encoder = g_encoder
-        self.g_decoder = g_decoder
+        self.l2_encoder = l2_encoder
+        self.l2_decoder = l2_decoder
         self.dropout_val = dropout
         self.dropout = nn.Dropout(self.dropout_val)
         self.max_grad_norm = max_grad_norm
-        self.input_size = input_size
-        self.rnn_size = rnn_size
-        # self.rnn = nn.LSTM(self.input_size, self.rnn_size, dropout=dropout,
-        #                   num_layers=layers,
-        #                   batch_first=True,
-        #                   bidirectional=True)
-        self.fwd_rnn = nn.LSTM(self.input_size, self.rnn_size, dropout=dropout,
-                               num_layers=layers,
-                               batch_first=True,
-                               bidirectional=False)
-        self.bwd_rnn = nn.LSTM(self.input_size, self.rnn_size, dropout=dropout,
-                               num_layers=layers,
-                               batch_first=True,
-                               bidirectional=False)
 
-        self.linear = nn.Linear(2 * self.rnn_size, self.input_size)
-        self.init_param_freeze(mode)
-        self.loss = torch.nn.CrossEntropyLoss(size_average=size_average, reduce=True, ignore_index=0)
-        self.eos_sym = None
-        self.bos_sym = None
-        #self.z = Variable(torch.zeros(1, 1, self.rnn_size), requires_grad=False)
-        self.z = torch.zeros(1, 1, self.rnn_size, requires_grad=False)
-        # .expand(batch_size, 1, self.rnn_size), requires_grad=False)
-        self.l1_key = None
-        self.l2_key = None
-        self.init_optimizer(type='SGD')
+    def forward(self, batcn):
+        raise NotImplementedError
 
-    def init_optimizer(self, type='Adam'):
-        #grad_params = [p for p in self.parameters() if p.requires_grad]
-        #total_params = [p for p in self.parameters()]
-        #print(str(len(grad_params)) + '/' + str(len(total_params)) + ' params requires_grad')
+    def do_backprop(self, batch, l2_seen=None, total_batches=None):
+        self.optimizer.zero_grad()
+        _l, _a = self(batch)
+        if isinstance(self.encoder, VariationalEmbeddings):
+            kl_loss = (1. / total_batches) * (self.encoder.log_q_w - self.encoder.log_p_w)
+            _l += kl_loss
+
+        _l.backward()
+
+        if self.mode == CEncoderModel.L2_LEARNING:
+                keep_grad = torch.zeros_like(self.l2_encoder.weight.grad)
+                keep_grad[l2_seen, :] = 1.0
+                self.l2_encoder.weight.grad *= keep_grad
+        grad_norm = torch.nn.utils.clip_grad_norm_(filter(lambda p: p.requires_grad, self.parameters()),
+                                                   self.max_grad_norm)
+        if math.isnan(grad_norm):
+            print('skipping update grad_norm is nan!')
+        else:
+            self.optimizer.step()
+        loss = _l.item()
+        #del _l
+        #del batch
+        return loss, grad_norm, _a
+
+
+    def init_param_freeze(self, mode):
+        self.mode = mode
+        if self.mode == CEncoderModel.L12_LEARNING or self.mode == CEncoderModel.L2_LEARNING:
+            self.dropout = nn.Dropout(0.0)
+            assert self.l2_encoder is not None
+            assert self.l2_decoder is not None
+            for p in self.parameters():
+                p.requires_grad = False
+            for p in self.l2_encoder.parameters():
+                p.requires_grad = True
+            for p in self.l2_decoder.parameters():
+                p.requires_grad = True
+            if isinstance(self.l2_encoder, VarEmbedding):
+                self.l2_encoder.word_representer.set_extra_feat_learnable(True)
+                assert isinstance(self.l2_decoder, VarLinear)
+                assert self.l2_decoder.word_representer.is_extra_feat_learnable
+            print('L2_LEARNING, L1 Parameters frozen')
+        elif self.mode == CEncoderModel.L1_LEARNING:
+            self.dropout = nn.Dropout(self.dropout_val)
+            for p in self.parameters():
+                p.requires_grad = True
+            if self.l2_encoder is not None:
+                for p in self.l2_encoder.parameters():
+                    p.requires_grad = False
+            if self.l2_decoder is not None:
+                for p in self.l2_decoder.parameters():
+                    p.requires_grad = False
+            print('L1_LEARNING, L2 Parameters frozen')
+            if isinstance(self.encoder, VarEmbedding):
+                self.encoder.word_representer.set_extra_feat_learnable(False)
+                assert isinstance(self.decoder, VarLinear)
+                assert not self.decoder.word_representer.is_extra_feat_learnable
+
+    def init_optimizer(self, type='Adam', lr=1.0):
         if type == 'Adam':
             self.optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()))
         elif type == 'SGD':
-            self.optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.parameters()), lr=1.0)
+            self.optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.parameters()), lr=lr)
         else:
             raise NotImplementedError("unknown optimizer option")
 
@@ -350,70 +391,175 @@ class CBiLSTM(nn.Module):
                 pass
 
     def init_cuda(self,):
-        self = self.cuda()
-        self.z = self.z.cuda()
-
-    def init_param_freeze(self, mode):
-        self.mode = mode
-        if self.mode == CBiLSTM.L12_LEARNING or self.mode == CBiLSTM.L2_LEARNING:
-            self.dropout = nn.Dropout(0.0)
-            assert self.g_encoder is not None
-            assert self.g_decoder is not None
-            for p in self.parameters():
-                p.requires_grad = False
-            for p in self.g_encoder.parameters():
-                p.requires_grad = True
-            for p in self.g_decoder.parameters():
-                p.requires_grad = True
-            if isinstance(self.g_encoder, VarEmbedding):
-                self.g_encoder.word_representer.set_extra_feat_learnable(True)
-                assert isinstance(self.g_decoder, VarLinear)
-                assert self.g_decoder.word_representer.is_extra_feat_learnable
-            # print('L2_LEARNING, L1 Parameters frozen')
-        elif self.mode == CBiLSTM.L1_LEARNING:
-            self.dropout = nn.Dropout(0.0)
-            for p in self.parameters():
-                p.requires_grad = True
-            if self.g_encoder is not None:
-                for p in self.g_encoder.parameters():
-                    p.requires_grad = False
-            if self.g_decoder is not None:
-                for p in self.g_decoder.parameters():
-                    p.requires_grad = False
-            # print('L1_LEARNING, L2 Parameters frozen')
-            if isinstance(self.encoder, VarEmbedding):
-                self.encoder.word_representer.set_extra_feat_learnable(False)
-                assert isinstance(self.decoder, VarLinear)
-                assert not self.decoder.word_representer.is_extra_feat_learnable
+        raise NotImplementedError
 
     def is_cuda(self,):
-        return self.fwd_rnn.weight_hh_l0.is_cuda
+        raise NotImplementedError
 
     def set_reset_weight(self,):
-        self.reset_weight = self.g_encoder.weight.detach().clone()
+        self.reset_weight = self.l2_encoder.weight.detach().clone()
 
     def update_g_weights(self, weights):
         if self.is_cuda():
             weights = weights.clone().cuda()
         else:
             weights = weights.clone()
-        self.g_encoder.weight.data = weights
-        self.g_decoder.weight.data = weights
+        self.l2_encoder.weight.data = weights
+        self.l2_decoder.weight.data = weights
 
     def score_embeddings(self,):
         if isinstance(self.encoder, VarEmbedding):
             raise NotImplementedError("only word level scores")
         else:
             l1_embedding = self.encoder.weight.data
-            l2_embedding = self.g_encoder.weight.data
-            # l2_key = l2_key.cuda() if self.is_cuda() else l2_key
-            # l1_key = l1_key.cuda() if self.is_cuda() else l1_key
+            l2_embedding = self.l2_encoder.weight.data
             s = score_embeddings(l2_embedding, l1_embedding, self.l2_key, self.l1_key)
-
-            # ps = prob_score_embeddings(l2_embedding, l1_embedding, l2_key, l1_key)
             return s.item()
 
-    def forward(self, batch, l2_seen=None):
+    def save_model(self, path):
+        torch.save(self, path)
+
+
+class CTransformerEncoder(CEncoderModel):
+    def __init__(self, input_size, model_size, layers,
+                 encoder, decoder,
+                 l2_encoder, l2_decoder,
+                 mode,
+                 l1_dict,
+                 l2_dict,
+                 size_average=False,
+                 max_positional_embeddings=100):
+        super().__init__(encoder, decoder, l2_encoder, l2_decoder, mode, l1_dict, l2_dict)
+        self.model_size = model_size
+        self.l1_embed_scale = math.sqrt(self.encoder.weight.shape[1])
+        if self.l2_encoder is not None:
+            self.l2_embed_scale = math.sqrt(self.l2_encoder.weight.shape[1])
+        else:
+            self.l2_embed_scale = None
+        self.input_size = input_size
+        self.max_positional_embeddings = max_positional_embeddings
+        self.positional_embeddings = nn.Embedding(max_positional_embeddings, self.encoder.weight.shape[1])
+        self.rev_positional_embeddings = nn.Embedding(max_positional_embeddings, self.encoder.weight.shape[1])
+        self.layers = nn.ModuleList(
+                [TransformerEncoderLayer(input_size, model_size, 1, self.dropout_val) for _ in range(layers)]
+                )
+        self.init_param_freeze(mode)
+        self.loss = torch.nn.CrossEntropyLoss(size_average=size_average, reduce=True, ignore_index=0)
+        self.l1_key = None
+        self.l2_key = None
+        #self.init_optimizer(type='SGD', lr=1.0)  # , lr=0.01)
+        self.init_optimizer(type='Adam')
+
+    def init_cuda(self,):
+        self = self.cuda()
+
+    def is_cuda(self,):
+        return self.layers[0].self_attn.k_linear.weight.is_cuda
+
+    def forward(self, batch):
+        lengths, l1_data, l2_data, ind = batch
+        batch_size, seq_len = l1_data.shape
+        l1_idxs = ind.eq(1).long()
+        l2_idxs = (ind - 1).lt(0).long()  # make all the -1s into 0, keep old 0s as 0
+        for st in [SPECIAL_TOKENS.PAD, SPECIAL_TOKENS.UNK, SPECIAL_TOKENS.EOS, SPECIAL_TOKENS.BOS]:
+            if st in self.l1_dict:
+                l1_idxs[l1_data.eq(self.l1_dict[st])] = 0
+                l2_idxs[l1_data.eq(self.l1_dict[st])] = 0
+
+        if self.mode == CTransformerEncoder.L1_LEARNING:
+            pos_data = torch.arange(lengths[0]).expand_as(l1_data).type_as(l1_data)
+            pos_data[pos_data > self.max_positional_embeddings - 1] = self.max_positional_embeddings - 1
+            l1_encoded = self.encoder(l1_data)
+            l1_pos_encoded = self.positional_embeddings(pos_data)
+            encoded = l1_encoded + l1_pos_encoded
+
+            mask = l1_idxs.eq(0) #l1_data.eq(self.padding_idx)
+            # if self.training:
+            ones = self.dropout(torch.ones_like(l1_data).float())
+            mask[ones.eq(0)] = 1
+            d = torch.arange(1, seq_len)
+            mask = mask.unsqueeze(1).repeat(1, seq_len, 1)
+            mask[:, d, d] = 1
+
+        elif self.mode == CTransformerEncoder.L2_LEARNING:
+            l1_encoded = self.encoder(l1_data)
+            l2_encoded = self.l2_encoder(l2_data)
+            #TODO: figure out mask for L2_LEARNING ##mask = l1_data.eq(self.padding_idx)
+            g_inp_ind = l2_idxs.unsqueeze(2).expand(l2_idxs.size(0), l2_idxs.size(1), l2_encoded.size(2)).float()
+            v_inp_ind = l1_idxs.unsqueeze(2).expand(l1_idxs.size(0), l1_idxs.size(1), l1_encoded.size(2)).float()
+            tmp_encoded = v_inp_ind * l1_encoded + g_inp_ind * l2_encoded
+            encoded = l1_encoded * l1_idxs.unsqueeze(2).expand_as(l1_encoded).float() + \
+                l2_encoded * l2_idxs.unsqueeze(2).expand_as(l2_encoded).float()
+            assert (encoded - tmp_encoded).sum().item() == 0
+        else:
+            raise NotImplementedError("L12_LEARNING not supported")
+
+        x = self.dropout(encoded)  #.transpose(0, 1)  # BS, SL, EMB -- > SL, BS, EMB
+        for layer in self.layers:
+            x, attn_probs = layer(x, mask)  # all the transformer magic
+        final_hidden = self.dropout(x)  #x.transpose(1, 0)  # SL, BS, EMB ---> BS, SL, EMB
+
+        if self.mode == CTransformerEncoder.L1_LEARNING:
+            l1_final_hidden = final_hidden[l1_idxs == 1, :]
+            l1_out = self.decoder(l1_final_hidden)
+            l1_pred = l1_out.argmax(1)
+            acc = l1_pred.eq(l1_data[l1_idxs == 1]).sum().item()
+            acc = float(acc) / float(l1_pred.size(0))
+            loss = self.loss(l1_out, l1_data[l1_idxs == 1])
+        else:
+            #TODO: figure out mask for L2_LEARNING
+            loss = None
+            acc = None
+            raise NotImplementedError("TODO....")
+        return loss, acc
+
+
+class CBiLSTM(CEncoderModel):
+
+    def __init__(self, input_size, rnn_size, layers,
+                 encoder, decoder,
+                 l2_encoder, l2_decoder,
+                 mode,
+                 l1_dict,
+                 l2_dict,
+                 size_average=False):
+        super().__init__(encoder, decoder, l2_encoder, l2_decoder, mode, l1_dict, l2_dict)
+        self.input_size = input_size
+        self.rnn_size = rnn_size
+        # self.rnn = nn.LSTM(self.input_size, self.rnn_size, dropout=dropout,
+        #                   num_layers=layers,
+        #                   batch_first=True,
+        #                   bidirectional=True)
+        self.fwd_rnn = nn.LSTM(self.input_size, self.rnn_size, dropout=self.dropout_val,
+                               num_layers=layers,
+                               batch_first=True,
+                               bidirectional=False)
+        self.bwd_rnn = nn.LSTM(self.input_size, self.rnn_size, dropout=self.dropout_val,
+                               num_layers=layers,
+                               batch_first=True,
+                               bidirectional=False)
+
+        #self.max_positional_embeddings = 100 #max_positional_embeddings
+        #self.positional_embeddings = nn.Embedding(self.max_positional_embeddings, self.encoder.weight.shape[1])
+        #self.layer_norm = nn.LayerNorm(input_size)
+        self.linear = nn.Linear(2 * self.rnn_size, self.input_size)
+        self.init_param_freeze(mode)
+        self.loss = torch.nn.CrossEntropyLoss(size_average=size_average, reduce=True, ignore_index=0)
+        #self.z = Variable(torch.zeros(1, 1, self.rnn_size), requires_grad=False)
+        self.z = torch.zeros(1, 1, self.rnn_size, requires_grad=False)
+        # .expand(batch_size, 1, self.rnn_size), requires_grad=False)
+        self.l1_key = None
+        self.l2_key = None
+        self.init_optimizer(type='Adam')
+
+    def init_cuda(self,):
+        self = self.cuda()
+        self.z = self.z.cuda()
+
+    def is_cuda(self,):
+        return self.fwd_rnn.weight_hh_l0.is_cuda
+
+    def forward(self, batch):
         lengths, l1_data, l2_data, ind = batch
         rev_idx_col = torch.zeros(l1_data.size(0), l1_data.size(1)).long()
         for _idx, l in enumerate(lengths):
@@ -423,9 +569,12 @@ class CBiLSTM(nn.Module):
         rev_idx_row = rev_idx_row.unsqueeze(1).expand(l1_data.shape[0], l1_data.shape[1])
         #if data.is_cuda:
         #    rev_idx_row = rev_idx_row.cuda()
-        v_ind = ind % 2
-        g_ind = ind - 1
-        g_ind[g_ind < 0] = 0
+        l1_idxs = ind.eq(1).long()
+        l2_idxs = (ind - 1).lt(0).long()  # make all the -1s into 0, keep old 0s as 0
+        for st in [SPECIAL_TOKENS.PAD, SPECIAL_TOKENS.UNK, SPECIAL_TOKENS.EOS, SPECIAL_TOKENS.BOS]:
+            if st in self.l1_dict:
+                l1_idxs[l1_data.eq(self.l1_dict[st])] = 0
+                l2_idxs[l1_data.eq(self.l1_dict[st])] = 0
         #if seen is not None:
         #    seen, seen_offset, seen_set = seen
         # if self.is_cuda():
@@ -435,29 +584,33 @@ class CBiLSTM(nn.Module):
 
         # l1_data = (batch_size x seq_len)
         # l2_data = (batch_size x seq_len)
-        if self.mode == CBiLSTM.L2_LEARNING:
+        if self.mode == CEncoderModel.L2_LEARNING:
             l1_encoded = self.encoder(l1_data)
-            l2_encoded = self.g_encoder(l2_data)
-            g_inp_ind = g_ind.unsqueeze(2).expand(g_ind.size(0), g_ind.size(1), l2_encoded.size(2)).float()
-            v_inp_ind = v_ind.unsqueeze(2).expand(v_ind.size(0), v_ind.size(1), l1_encoded.size(2)).float()
+            l2_encoded = self.l2_encoder(l2_data)
+            g_inp_ind = l2_idxs.unsqueeze(2).expand(l2_idxs.size(0), l2_idxs.size(1), l2_encoded.size(2)).float()
+            v_inp_ind = l1_idxs.unsqueeze(2).expand(l1_idxs.size(0), l1_idxs.size(1), l1_encoded.size(2)).float()
             tmp_encoded = v_inp_ind * l1_encoded + g_inp_ind * l2_encoded
-            encoded = l1_encoded * v_ind.unsqueeze(2).expand_as(l1_encoded).float() + \
-                l2_encoded * g_ind.unsqueeze(2).expand_as(l2_encoded).float()
+            encoded = l1_encoded * l1_idxs.unsqueeze(2).expand_as(l1_encoded).float() + \
+                l2_encoded * l2_idxs.unsqueeze(2).expand_as(l2_encoded).float()
             assert (encoded - tmp_encoded).sum().item() == 0
             encoded = self.dropout(encoded)
-        elif self.mode == CBiLSTM.L12_LEARNING:
+        elif self.mode == CEncoderModel.L12_LEARNING:
             raise NotImplementedError("no longer supported")
             l1_encoded = self.encoder(l1_data)
-            l2_encoded = self.g_encoder(l2_data)
-            g_inp_ind = g_ind.unsqueeze(2).expand(g_ind.size(0), g_ind.size(1), l2_encoded.size(2)).float()
-            v_inp_ind = v_ind.unsqueeze(2).expand(v_ind.size(0), v_ind.size(1), l1_encoded.size(2)).float()
+            l2_encoded = self.l2_encoder(l2_data)
+            g_inp_ind = l2_idxs.unsqueeze(2).expand(l2_idxs.size(0), l2_idxs.size(1), l2_encoded.size(2)).float()
+            v_inp_ind = l1_idxs.unsqueeze(2).expand(l1_idxs.size(0), l1_idxs.size(1), l1_encoded.size(2)).float()
             tmp_encoded = v_inp_ind * l1_encoded + g_inp_ind * l2_encoded
-            encoded = l1_encoded * v_ind.unsqueeze(2).expand_as(l1_encoded).float() + \
-                l2_encoded * g_ind.unsqueeze(2).expand_as(l2_encoded).float()
+            encoded = l1_encoded * l1_idxs.unsqueeze(2).expand_as(l1_encoded).float() + \
+                l2_encoded * l2_idxs.unsqueeze(2).expand_as(l2_encoded).float()
             assert (encoded - tmp_encoded).sum().item() == 0
             encoded = self.dropout(encoded)
         else:
+            #pos_data = torch.arange(lengths[0]).expand_as(l1_data).type_as(l1_data)
+            #pos_data[pos_data > self.max_positional_embeddings - 1] = self.max_positional_embeddings - 1
             l1_encoded = self.encoder(l1_data)
+            #l1_pos_encoded = self.positional_embeddings(pos_data)
+            #l1_encoded += l1_pos_encoded
             encoded = self.dropout(l1_encoded)
 
         # bwd_encoded = torch.zeros_like(fwd_encoded)
@@ -493,60 +646,27 @@ class CBiLSTM(nn.Module):
         final_hidden = torch.cat((fwd_hidden, rev_bwd_hidden), dim=2)
         final_hidden = self.dropout(final_hidden)
         final_hidden = self.linear(final_hidden)
+        #final_hidden = self.layer_norm(final_hidden)
 
-        if self.mode == CBiLSTM.L1_LEARNING:
-            l1_final_hidden = final_hidden[v_ind == 1, :]
+        if self.mode == CEncoderModel.L1_LEARNING:
+            l1_final_hidden = final_hidden[l1_idxs == 1, :]
             l1_out = self.decoder(l1_final_hidden)
-            loss = self.loss(l1_out, l1_data[v_ind == 1])
-        elif self.mode == CBiLSTM.L2_LEARNING or self.mode == CBiLSTM.L12_LEARNING:
-            l1_final_hidden = final_hidden[v_ind == 1, :]
+            l1_pred = l1_out.argmax(1)
+            acc = l1_pred.eq(l1_data[l1_idxs == 1]).sum().item()
+            acc = float(acc) / float(l1_pred.size(0))
+            loss = self.loss(l1_out, l1_data[l1_idxs == 1])
+        elif self.mode == CEncoderModel.L2_LEARNING or self.mode == CEncoderModel.L12_LEARNING:
+            l1_final_hidden = final_hidden[l1_idxs == 1, :]
             l1_out = self.decoder(l1_final_hidden)
-            l1_loss = self.loss(l1_out, l1_data[v_ind == 1])
-            l2_final_hidden = final_hidden[v_ind == 0, :]
+            l1_loss = self.loss(l1_out, l1_data[l1_idxs == 1])
+            l2_final_hidden = final_hidden[l2_idxs == 1, :]
             if l2_final_hidden.shape[0] > 0:
-                l2_out = self.g_decoder(l2_final_hidden)
-                l2_loss = self.loss(l2_out, l2_data[v_ind == 0])
+                l2_out = self.l2_decoder(l2_final_hidden)
+                l2_loss = self.loss(l2_out, l2_data[l2_idxs == 1])
                 loss = l1_loss + l2_loss
             else:
                 loss = l1_loss
+            acc = None  # TODO
         else:
             raise BaseException("unknown learning type")
-        return loss
-
-    def do_backprop(self, batch, l2_seen=None, total_batches=None):
-        self.optimizer.zero_grad()
-        _l = self(batch, l2_seen=l2_seen)
-        if isinstance(self.encoder, VariationalEmbeddings):
-            # print('encoder mu', self.encoder.mean[10].sum())
-            # print('decoder mu', self.decoder.mean[10].sum())
-            # print('encoder rho', self.encoder.rho[10].sum())
-            # print('decoder rho', self.decoder.rho[10].sum())
-            # print('\nlpw', self.encoder.log_p_w.item())
-            # print('lqw', self.encoder.log_q_w.item())
-            kl_loss = (1. / total_batches) * (self.encoder.log_q_w - self.encoder.log_p_w)
-            # print('kl', kl_loss.item())
-            # print('l', l.item())
-            _l += kl_loss
-            # print('full', l.item())
-
-        _l.backward()
-
-        if self.mode == CBiLSTM.L2_LEARNING:
-                keep_grad = torch.zeros_like(self.g_encoder.weight.grad)
-                keep_grad[l2_seen, :] = 1.0
-                self.g_encoder.weight.grad *= keep_grad
-        # print(self.encoder.weight[10], self.encoder.weight[10].sum())
-        #grad_sum = sum([p.grad.data.sum().item() for p in self.parameters() if p.requires_grad])
-        grad_norm = torch.nn.utils.clip_grad_norm_(filter(lambda p: p.requires_grad, self.parameters()),
-                                                   self.max_grad_norm)
-        if math.isnan(grad_norm):
-            print('skipping update grad_norm is nan!')
-        else:
-            self.optimizer.step()
-        loss = _l.item()
-        #del _l
-        #del batch
-        return loss, grad_norm
-
-    def save_model(self, path):
-        torch.save(self, path)
+        return loss, acc

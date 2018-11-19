@@ -3,12 +3,16 @@ import argparse
 import pickle
 import sys
 import torch
+import random
+import time
+import pdb
 
 from model import CBiLSTM
 from model import VarEmbedding
 from model import WordRepresenter
 from search import apply_swap
 from search import beam_search
+from search import random_walk
 from search import make_start_state
 from search import MacaronicSentence
 from search import MacaronicState
@@ -22,7 +26,6 @@ from utils import parallel_collate
 from utils import TEXT_EFFECT
 
 import numpy as np
-import pdb
 
 global PAD, EOS, BOS, UNK, EPS
 PAD = '<PAD>'
@@ -32,45 +35,62 @@ EOS = '<EOS>'
 EPS = 1e-4
 
 class SearchTree(object):
-    def __init__(self, game, rollout_func, rollout_params, state_update_func, options):
+    def __init__(self, game, rollout_func, rollout_params, state_update_func):
         self.game = game
         self.rollout_func = rollout_func
         self.rollout_params = rollout_params
         self.state_update_func = state_update_func
-        self.options = options
-        self.iters = 1000
+        self.iters = 300
         self.nodes_seen = {}
         self.gamma = 1.0
+        self.max_backup = 0
+        self.C = 1.0
+        self.D = 10.
+        self.consecutive_action_threshold = 1
+
+    def recursive_search(self, root_node):
+        node = root_node
+        while not node.state.terminal:
+            self.nodes_seen = {}
+            node = self.search(node)
+            #node.reset()
+        return node
 
     def search(self, root_node):
         self.nodes_seen[str(root_node.state)] = root_node
+        best_action_count = 0
+        prev_best_action = None
         for _ in range(self.iters):
-            if _ % 50 == 0:
-                sys.stdout.write('.')
-                sys.stdout.flush()
             print('************************ search iter' + str(_) + '*************************')
             print('======root node=====\n', root_node)
+            if root_node.completed_expansion:
+                self.display_child_values(root_node, self.C)
+                best_action, best_node = self.select_child(root_node, self.C)
+                best_action_count = best_action_count + 1 if best_action == prev_best_action else 0
+                prev_best_action = best_action
+                if best_action_count > self.consecutive_action_threshold:
+                    return best_node
+
             node, search_sequence = self.selection(root_node)
             print('===selection node===\n', node)
-            if node.state.terminal:
-                print('selection is is_terminal')
-                pdb.set_trace()
-            node, search_sequence = self.expansion(node, search_sequence)
-            print('===expansion node===\n', node)
-            terminal_state = self.rollout(node)
-            print('===terminal state===\n', terminal_state)
-            #reward = 1.0 if terminal_state.terminal_score > 150 else -1.0
-            reward = terminal_state.score
-            self.backup(node, reward, 0, search_sequence)
+            if not node.state.terminal:
+                node, search_sequence = self.expansion(node, search_sequence)
+                print('===expansion node===\n', node)
+                rollout_state = self.rollout(node)
+                print('===rollout state===\n', rollout_state)
+                reward = rollout_state.score - root_node.state.score
+            else:
+                reward = node.state.score - root_node.state.score
+            self.backup(reward, 0, search_sequence)
             print('********************** end search iter' + str(_) + '*******************')
         best_action, best_node = self.select_child(root_node, 0.0)
-        return best_action
+        return best_node
 
     def selection(self, node):
         search_sequence = [node]
         while node.completed_expansion:
             assert not node.state.terminal
-            action, node = self.select_child(node, 0.0005)
+            action, node = self.select_child(node, self.C)
             search_sequence.append(node)
         return node, search_sequence
 
@@ -82,82 +102,84 @@ class SearchTree(object):
         return node, search_sequence
 
     def rollout(self, node):
-        if self.rollout_func is not None:
-            state = self.rollout_func(node.state, **self.rollout_params)
-        else:
-            state = node.state
-            steps = 0
-            while not state.terminal:
-                pa = self.game.possible_actions(state)
-                selected_action = np.random.choice(pa) #[np.random.choice(len(pa))]
-                state = state.next_state(state, selected_action, self.state_update_func, **self.rollout_params)
-                steps += 1
-            return state
+        assert self.rollout_func is not None
+        now = time.time()
+        rollout_start_state = node.state.copy()
+        rollout_start_state.binary_branching = self.rollout_params['binary_branching']
+        state = self.rollout_func(rollout_start_state, **self.rollout_params)
+        print('rollout time', time.time() - now)
+        return state
 
-    def backup(self, node, reward, winner, search_sequence):
+    def backup(self, reward, winner, search_sequence):
         # print('------------------backup-----------------')
         for node in search_sequence:
-            node.rewards[winner] += reward
-            node.visits += 1
+            node.visits += 1.0
+            node.prev_value[winner] = node.value[winner]  # value at previous time-step
+            if self.max_backup == 1:
+                node.value[winner] = reward if reward > node.value[winner] else node.value[winner]
+            else:
+                node.value[winner] += ((reward - node.value[winner])/(node.visits))
+            node.prod_std_deviation[winner] += (node.value[winner] - node.prev_value[winner]) * (node.value[winner] - node.value[winner])
         # print('-----------------------------------------')
+
         return True
 
     def display_child_values(self, node, exp_param):
-        combined, values, ucb, actions, rewards, reward_sum, visits = self.child_scores(node, exp_param)
-        f = [(a[1], a[0], c, v, u, w, sw, vs) for a, c, v, u, w, sw, vs in zip(actions, combined, values, ucb, rewards, reward_sum, visits)]
+        combined, values, ucb, variance_terms, actions, visits = self.child_scores(node, exp_param)
+        f = [(a, c, v, u, vrt, vs) for a, c, v, u, vrt, vs in zip(actions, combined, values, ucb, variance_terms, visits)]
         s = '\n'.join(['combined %0.2f' % c +
                        ' value: %0.2f' % v +
                        ' ucb: %0.2f' % u +
-                       ' position:' + str(a0) + ',' + str(a1) +
-                       ' rewards:' + w + ' reward_sum:' + sw +
+                       ' var_term:' + str(vrt) +
+                       ' action:' + str(a) +
                        ' visits:' + str(vs) for
-                       a1, a0, c, v, u, w, sw, vs in sorted(f)])
+                       a, c, v, u, vrt, vs in sorted(f)])
         print(s)
-        return s
+        return np.mean(variance_terms) < 1.0
 
     def child_scores(self, node, exp_param):
         n_visits = float(node.visits)
         cn_player = 0 #3 - node.state.player  # make selection from current node to child node
         values = np.zeros(len(node.expanded_actions))
+        variance_terms = np.zeros(len(node.expanded_actions))
         ucb = np.zeros(len(node.expanded_actions))
         actions = [None] * len(node.expanded_actions)
-        rewards = []
-        reward_sum = []
         visits = []
         for idx, (a, cn) in enumerate(node.expanded_actions.items()):
             cn_visits = cn.visits
-            cn_value = (float(cn.rewards[cn_player]) / float(cn_visits))
+            cn_value = cn.value[cn_player] #(float(cn.rewards[cn_player]) / float(cn_visits))
             cn_ucb = np.sqrt(np.log2(n_visits) / cn_visits)
+            cn_variance = (cn.prod_std_deviation[cn_player]/cn_visits) ** 2
             assert not np.isnan(cn_value)
             assert not np.isnan(cn_ucb)
             values[idx] = cn_value
+            variance_terms[idx] = np.sqrt(cn_variance + (self.D / cn_visits))
             ucb[idx] = cn_ucb
             actions[idx] = a
-            rewards.append(' '.join(['%.5f' % w for w in cn.rewards]))
-            reward_sum.append('%.5f' % sum(cn.rewards))
             visits.append(cn.visits)
-        combined = (1.0 - exp_param) * values + exp_param * ucb
-        return combined, values, ucb, actions, rewards, reward_sum, visits
+        combined = values + (exp_param * ucb) + variance_terms
+        return combined, values, ucb, variance_terms, actions, visits
 
     def select_child(self, node, exp_param):
-        combined, values, ucb, actions, rewards, reward_sum, visits = self.child_scores(node, exp_param)
-        max_idx = np.random.choice(np.flatnonzero(combined == combined.max()))
+        combined, values, ucb, var_terms, actions, visits = self.child_scores(node, exp_param)
+        flat_nonzero = np.flatnonzero(combined == combined.max())
+        max_idx = np.random.choice(flat_nonzero)
         best_action = actions[max_idx]
         return best_action, node.expanded_actions[best_action]
 
     def expand_child(self, node):
         assert len(node.unexpanded_actions) > 0
         pa = list(node.unexpanded_actions.keys())
-        action = np.random.choice(pa)
+        action = random.choice(pa)
         _ = node.unexpanded_actions.pop(action)
         new_state = self.game.next_state(node.state, action)
-        new_rewards = [EPS]
-        new_state_unexpanded_actions = {a: None for a in self.game.possible_actions(new_state)}
+        __actions, __action_weights = self.game.possible_actions(new_state)
+        new_state_unexpanded_actions = {a: None for a in __actions}
         new_state_expanded_actions = {}
         if str(new_state) in self.nodes_seen:
             expanded_node = self.nodes_seen[str(new_state)]
         else:
-            expanded_node = SearchNode(new_state, new_state_unexpanded_actions, new_state_expanded_actions, new_rewards)
+            expanded_node = SearchNode(new_state, new_state_unexpanded_actions, new_state_expanded_actions)
             self.nodes_seen[str(new_state)] = expanded_node
 
         node.update_expansion(action, expanded_node)
@@ -165,13 +187,26 @@ class SearchTree(object):
 
 
 class SearchNode(object):
-    def __init__(self, state, unexpanded_actions, expanded_actions, rewards):
+    def __init__(self, state, unexpanded_actions, expanded_actions):
         self.state = state
         self.unexpanded_actions = unexpanded_actions
         self.expanded_actions = expanded_actions
-        self.rewards = rewards
         self.visits = 0
         self.completed_expansion = False
+        self.value = [EPS]
+        self.prev_value = [EPS]
+        self.prod_std_deviation = [1.0]
+
+    def reset(self, ):
+        possible_actions, possible_action_weights = self.state.possible_actions()
+        self.unexpanded_actions = {a: None for a in possible_actions}
+        self.expanded_actions = {}
+        self.visits = 0
+        self.completed_expansion = False
+        self.value = [EPS]
+        self.prev_value = [EPS]
+        self.prod_std_deviation = [1.0]
+
 
     def update_expansion(self, action, child_node):
         assert action not in self.expanded_actions
@@ -182,7 +217,7 @@ class SearchNode(object):
     def __str__(self,):
         s = str(self.state) + '\n'
         s += 'visits:' + str(self.visits) + '\n'
-        s += 'rewards:' + ' '.join(['%.2f' % i for i in self.rewards]) + '\n'
+        s += 'value:' + ' '.join(['%.2f' % i for i in self.value]) + '\n'
         s += 'u:' + str(len(self.unexpanded_actions)) + ' e:' + str(len(self.expanded_actions)) + '\n'
         s += 'exp complete:' + str(self.completed_expansion) + '\n'
         return s
@@ -197,9 +232,10 @@ class Game(object):
 
     def possible_actions(self, state):
         if state is not None:
-            return state.possible_actions()
+            actions, action_weights = state.possible_actions()
+            return actions, action_weights
         else:
-            return []
+            return [],[]
 
     def next_state(self, state, action):
         return state.next_state(action, self.model_config_func, **self.opt)
@@ -207,8 +243,6 @@ class Game(object):
 
 if __name__ == '__main__':
     print(sys.stdout.encoding)
-    torch.manual_seed(1234)
-    np.random.seed(1234)
     opt = argparse.ArgumentParser(description="write program description here")
     # insert options here
     opt.add_argument('--data_dir', action='store', dest='data_folder', required=True)
@@ -227,16 +261,26 @@ if __name__ == '__main__':
     opt.add_argument('--batch_size', action='store', type=int, dest='batch_size', default=1)
     opt.add_argument('--gpuid', action='store', type=int, dest='gpuid', default=-1)
     opt.add_argument('--trained_model', action='store', dest='trained_model', required=True)
+    opt.add_argument('--stochastic', action='store', dest='stochastic', default=0, type=int, choices=[0, 1])
     opt.add_argument('--swap_limit', action='store', dest='swap_limit', default=0.3, type=float)
     opt.add_argument('--key', action='store', dest='key', required=True)
     opt.add_argument('--penalty', action='store', dest='penalty', default=0.2, type=float)
-    opt.add_argument('--steps', action='store', dest='steps', required=False, default=10)
+    opt.add_argument('--binary_branching', action='store', dest='binary_branching', default=0, type=int, choices=[0, 1])
     opt.add_argument('--beam_size', action='store', dest='beam_size', default=10, type=int)
     opt.add_argument('--max_steps', action='store', dest='max_steps', default=100, type=int)
     opt.add_argument('--improvement', action='store', dest='improvement_threshold', default=0.01, type=float)
+    opt.add_argument('--rollout_function', action='store', dest='rollout_function', default='random_walk', type=str,
+                     choices=['beam_search', 'random_walk'])
+    opt.add_argument('--rollout_binary_branching', action='store', dest='rollout_binary_branching', default=1, type=int,
+                     choices=[0, 1])
     opt.add_argument('--verbose', action='store_true', dest='verbose', default=False)
+    opt.add_argument('--seed', action='store', dest='seed', default=1234, type=int)
+
     options = opt.parse_args()
     print(options)
+    torch.manual_seed(options.seed)
+    random.seed(options.seed)
+    np.random.seed(options.seed)
     if options.gpuid > -1:
         torch.cuda.set_device(options.gpuid)
         tmp = torch.ByteTensor([0])
@@ -316,9 +360,23 @@ if __name__ == '__main__':
     game = Game(dataloader, cbilstm, apply_swap, opt=kwargs)
     start_state = make_start_state(i2v, i2gv, weights, cbilstm, dataloader, **kwargs)
     print(str(start_state))
-    rollout_params = vars(options)
-    search_tree = SearchTree(game, beam_search, rollout_params, options)
-    unexpanded_actions = {a: None for a in game.possible_actions(start_state)}
+    rollout_params = {'stochastic': 0,
+                      'verbose': False,  # options.verbose,
+                      'improvement_threshold': options.improvement_threshold,
+                      'penalty': 0.2, # options.penalty,
+                      'beam_size': 1,  # options.beam_size,
+                      'max_steps': 1, # options.max_steps,
+                      'swap_limit': 1.0, #options.swap_limit,
+                      'binary_branching': options.rollout_binary_branching,  # options.binary_branching,
+                      'max_search_depth': 99}
+    if options.rollout_function == 'random_walk':
+        search_tree = SearchTree(game, random_walk, rollout_params, apply_swap)
+    else:
+        search_tree = SearchTree(game, beam_search, rollout_params, apply_swap)
+    possible_actions, possible_action_weights = start_state.possible_actions()
+    unexpanded_actions = {a: None for a in possible_actions}
     expanded_actions = {}
-    root_node = SearchNode(start_state, unexpanded_actions, expanded_actions, [EPS])
-    terminal_state = search_tree.rollout(root_node)
+    root_node = SearchNode(start_state, unexpanded_actions, expanded_actions)
+    terminal_node = search_tree.recursive_search(root_node)
+    print('completed mcts')
+    print(str(terminal_node))

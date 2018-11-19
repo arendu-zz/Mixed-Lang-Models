@@ -52,7 +52,10 @@ class Preprocess(object):
                     words = line.strip().split()
                     assert len(words) > 0
                     for word in words:
-                        if len(word) + 2 < max_word_len:
+                        if word in self.spl_words:
+                            pass
+                        elif len(word) + 2 < max_word_len:
+                            word = word.lower()
                             self.wc[word] = self.wc.get(word, 0) + 1
                             total_words += 1
                         else:
@@ -124,7 +127,7 @@ class Preprocess(object):
 if __name__ == '__main__':
     args = parse_args()
     preprocess = Preprocess()
-    corpus_file = os.path.join(args.data_dir, 'corpus.txt')
+    corpus_file = os.path.join(args.data_dir, 'corpus.en')
     gloss_file = os.path.join(args.data_dir, 'gloss.txt')
     preprocess.build(data_dir=args.data_dir,
                      corpus_file=corpus_file,

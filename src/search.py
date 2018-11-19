@@ -367,7 +367,7 @@ def apply_swap(macaronic_config, model, weights, max_steps=1, improvement_thresh
         #prev_loss = loss
     #    print(num_steps, 'step score', step_score_vocabtype, 'loss', loss)
     #step_score_vocabtype = model.score_embeddings(l2_key, l1_key)
-    new_weights = model.g_encoder.weight.clone().detach().cpu()
+    new_weights = model.l2_encoder.weight.clone().detach().cpu()
     return step_score_vocabtype, new_weights
 
 
@@ -387,8 +387,8 @@ def make_start_state(i2v, i2gv, init_weights, model, dl, **kwargs):
                                set([]), [],
                                kwargs['swap_limit'])
         macaronic_sentences.append(ms)
-        if len(macaronic_sentences) > 2:
-            break
+        #if len(macaronic_sentences) > 2:
+        #    break
     state = MacaronicState(macaronic_sentences, 0, model, score_0, kwargs['binary_branching'])
     state.weights = init_weights
     state.score = score_0
@@ -500,8 +500,8 @@ if __name__ == '__main__':
         decoder = make_wl_decoder(encoder)
         cbilstm.encoder = encoder
         cbilstm.decoder = decoder
-        cbilstm.g_encoder = g_cl_encoder
-        cbilstm.g_decoder = g_cl_decoder
+        cbilstm.l2_encoder = g_cl_encoder
+        cbilstm.l2_decoder = g_cl_decoder
         cbilstm.init_param_freeze(CBiLSTM.L2_LEARNING)
     else:
         learned_weights = cbilstm.encoder.weight.data.clone()
@@ -512,8 +512,8 @@ if __name__ == '__main__':
         g_wl_decoder = make_wl_decoder(g_wl_encoder)
         cbilstm.encoder = encoder
         cbilstm.decoder = decoder
-        cbilstm.g_encoder = g_wl_encoder
-        cbilstm.g_decoder = g_wl_decoder
+        cbilstm.l2_encoder = g_wl_encoder
+        cbilstm.l2_decoder = g_wl_decoder
         cbilstm.init_param_freeze(CBiLSTM.L2_LEARNING)
     if options.gpuid > -1:
         cbilstm.init_cuda()
@@ -522,9 +522,9 @@ if __name__ == '__main__':
     print(cbilstm)
     macaronic_sents = []
     if cbilstm.is_cuda:
-        weights = cbilstm.g_encoder.weight.clone().detach().cpu()
+        weights = cbilstm.l2_encoder.weight.clone().detach().cpu()
     else:
-        weights = cbilstm.g_encoder.weight.clone().detach()
+        weights = cbilstm.l2_encoder.weight.clone().detach()
     init_weights = weights.clone()
     kwargs = vars(options)
     start_state = make_start_state(i2v, i2gv, init_weights, cbilstm, dataset, **kwargs)

@@ -7,9 +7,9 @@ import pickle
 import random
 import time
 import torch
-import pdb
 
 from model import CBiLSTM
+from model import CTransformerEncoder
 from model import VarEmbedding
 from model import VariationalEmbeddings
 from model import VarLinear
@@ -46,8 +46,9 @@ def make_wl_encoder(vocab_size=None, embedding_size=None, wt=None):
         assert vocab_size is not None
         assert embedding_size is not None
         e = torch.nn.Embedding(vocab_size, embedding_size)
-        e.weight = torch.nn.Parameter(torch.FloatTensor(vocab_size, embedding_size).uniform_(-0.01 / embedding_size,
-                                                                                             0.01 / embedding_size))
+        torch.nn.init.xavier_uniform_(e.weight)
+        #e.weight = torch.nn.Parameter(torch.FloatTensor(vocab_size, embedding_size).uniform_(-0.01 / embedding_size,
+        #                                                                                     0.01 / embedding_size))
     else:
         e = torch.nn.Embedding(wt.size(0), wt.size(1))
         e.weight = torch.nn.Parameter(wt)
@@ -55,8 +56,9 @@ def make_wl_encoder(vocab_size=None, embedding_size=None, wt=None):
 
 
 def make_wl_decoder(encoder):
-    decoder = torch.nn.Linear(encoder.weight.size(0), encoder.weight.size(1), bias=False)
+    decoder = torch.nn.Linear(encoder.weight.size(1), encoder.weight.size(0), bias=False)
     decoder.weight = encoder.weight
+    #torch.nn.init.xavier_uniform_(decoder.weight)
     return decoder
 
 
@@ -73,9 +75,11 @@ if __name__ == '__main__':
                      help='vocab to spelling pickle obj')
     opt.add_argument('--c2i', action='store', dest='c2i', required=True,
                      help='character (corpus and gloss)  to index pickle obj')
+    opt.add_argument('--model_type', action='store', dest='model_type', default='lstm',
+                     choices=set(['lstm', 'transformer']), help='type of contextual model to use')
     opt.add_argument('--w_embedding_size', action='store', type=int, dest='w_embedding_size', default=500)
     opt.add_argument('--layers', action='store', type=int, dest='layers', default=1)
-    opt.add_argument('--rnn_size', action='store', type=int, dest='rnn_size', default=250)
+    opt.add_argument('--model_size', action='store', type=int, dest='model_size', default=250)
     opt.add_argument('--c_embedding_size', action='store', type=int, dest='c_embedding_size', default=20)
     opt.add_argument('--batch_size', action='store', type=int, dest='batch_size', default=20)
     opt.add_argument('--gpuid', action='store', type=int, dest='gpuid', default=-1)
@@ -106,16 +110,23 @@ if __name__ == '__main__':
 
     train_mode = CBiLSTM.L1_LEARNING
     train_dataset = TextDataset(options.train_corpus, v2i, shuffle=True, sort_by_len=True,
-                                min_batch_size=options.batch_size, max_batch_size=10000)
+                                min_batch_size=options.batch_size)
     if options.dev_corpus is not None:
         dev_dataset = TextDataset(options.dev_corpus, v2i, shuffle=False, sort_by_len=True,
-                                  min_batch_size=options.batch_size, max_batch_size=10000)
+                                  min_batch_size=options.batch_size)
     vocab_size = len(v2i)
     if options.char_composition == 'None':
         encoder = make_wl_encoder(vocab_size, options.w_embedding_size, None)
         decoder = make_wl_decoder(encoder)
-        cbilstm = CBiLSTM(options.w_embedding_size, options.rnn_size, options.layers,
-                          encoder, decoder, None, None, mode=CBiLSTM.L1_LEARNING)
+        encoder.padding_idx = v2i[SPECIAL_TOKENS.PAD]
+        if options.model_type == 'lstm':
+            cloze_model = CBiLSTM(options.w_embedding_size, options.model_size, options.layers,
+                                  encoder, decoder, None, None, mode=CBiLSTM.L1_LEARNING, l1_dict=v2i, l2_dict=None)
+        elif options.model_type == 'transformer':
+            cloze_model = CTransformerEncoder(options.w_embedding_size, options.model_size, options.layers,
+                                              encoder, decoder, None, None, mode=CTransformerEncoder.L1_LEARNING, l1_dict=v2i, l2_dict=None)
+        else:
+            raise NotImplementedError("unknown model type")
     elif options.char_composition == 'Variational':
         mean = torch.FloatTensor(vocab_size, options.w_embedding_size).uniform_(-0.01 / options.w_embedding_size,
                                                                                 0.01 / options.w_embedding_size)
@@ -126,8 +137,15 @@ if __name__ == '__main__':
         rho.requires_grad = True
         encoder = make_vl_encoder(mean, rho, float(np.exp(options.lsp)))  # log sigma prior
         decoder = make_vl_decoder(mean, rho)
-        cbilstm = CBiLSTM(options.w_embedding_size, options.rnn_size, options.layers,
-                          encoder, decoder, None, None, mode=CBiLSTM.L1_LEARNING)
+        if options.model_type == 'lstm':
+            cloze_model = CBiLSTM(options.w_embedding_size, options.model_size, options.layers,
+                                  encoder, decoder, None, None, mode=CBiLSTM.L1_LEARNING, l1_dict=v2i, l2_dict=None)
+        elif options.model_type == 'transformer':
+            cloze_model = CTransformerEncoder(options.w_embedding_size, options.model_size, options.layers,
+                                              encoder, decoder, None, None, mode=CTransformerEncoder.L1_LEARNING,
+                                              l1_dict=v2i, l2_dict=None)
+        else:
+            raise NotImplementedError("unknown model type")
     else:
         wr = WordRepresenter(v2c, c2i, len(c2i), options.c_embedding_size, c2i[SPECIAL_TOKENS.PAD],
                              options.w_embedding_size // (2 if options.char_bidirectional else 1),
@@ -139,56 +157,68 @@ if __name__ == '__main__':
             wr.init_cuda()
         cl_encoder = make_cl_encoder(wr)
         cl_decoder = make_cl_decoder(wr)
-        cbilstm = CBiLSTM(options.w_embedding_size, options.rnn_size, options.layers,
-                          cl_encoder, cl_decoder, None, None, mode=CBiLSTM.L1_LEARNING)
+        cloze_model = CBiLSTM(options.w_embedding_size, options.model_size, options.layers,
+                              cl_encoder, cl_decoder, None, None, mode=CBiLSTM.L1_LEARNING,
+                              l1_dict=v2i,l2_dict=None)
     if options.gpuid > -1:
-        cbilstm.init_cuda()
+        cloze_model.init_cuda()
 
-    print(cbilstm)
+    print(cloze_model)
     ave_time = 0.
     s = time.time()
     total_batches = 0 #train_dataset.num_batches
     for epoch in range(options.epochs):
-        cbilstm.train()
+        cloze_model.train()
         train_losses = []
+        train_accs = []
         for batch_idx, batch in enumerate(train_dataset):
             l, data, text_data = batch
-            ind = torch.ones_like(data).long()
-            if cbilstm.is_cuda():
+            ind = data.ne(v2i[SPECIAL_TOKENS.PAD]).long()
+            if cloze_model.is_cuda():
                 data = data.cuda()
                 ind = ind.cuda()
             cuda_batch = l, data, data, ind
-            loss, grad_norm = cbilstm.do_backprop(cuda_batch, total_batches=total_batches)
-            if batch_idx % 10 == 0 and batch_idx > 0:
+            loss, grad_norm, acc = cloze_model.do_backprop(cuda_batch, total_batches=total_batches)
+            if batch_idx % 100 == 0 and batch_idx > 0:
                 e = time.time()
-                ave_time = (e - s) / 10.
+                ave_time = (e - s) / 100.
                 s = time.time()
-                print("e{:d} b{:5d}/{:5d} loss:{:7.6f} ave_time:{:7.6f}\r".format(epoch, batch_idx + 1,
-                                                                                  total_batches, loss, ave_time))
+                print("e{:d} b{:d}/{:d} loss:{:7.6f} acc:{:.3f} ave_time:{:7.6f}\r".format(epoch,
+                                                                                           batch_idx + 1,
+                                                                                           total_batches,
+                                                                                           loss,
+                                                                                           acc,
+                                                                                           ave_time))
             else:
+                #print("e{:d} b{:d}/{:d} loss:{:7.6f} acc:{:.3f}\r".format(epoch, batch_idx + 1, total_batches, loss, acc))
                 pass
-                #print("e{:d} b{:d}/{:d} loss:{:7.6f}\r".format(epoch, batch_idx + 1, total_batches, loss))
             train_losses.append(loss)
+            train_accs.append(acc)
         total_batches = batch_idx
         dev_losses = []
+        dev_accs = []
         assert options.dev_corpus is not None
-        cbilstm.eval()
+        cloze_model.eval()
         for batch_idx, batch in enumerate(dev_dataset):
             l, data, text_data = batch
             ind = torch.ones_like(data).long()
-            if cbilstm.is_cuda():
+            if cloze_model.is_cuda():
                 data = data.cuda()
                 ind = ind.cuda()
             cuda_batch = l, data, data, ind
-            loss = cbilstm(cuda_batch)
-            if cbilstm.is_cuda():
+            with torch.no_grad():
+                loss, acc = cloze_model(cuda_batch)
                 loss = loss.item()  # .data.cpu().numpy()[0]
-            else:
-                loss = loss.item()  # .data.numpy()[0]
             dev_losses.append(loss)
-        print("Ending e{:d} AveTrainLoss:{:7.6f} AveDevLoss:{:7.6f}\r".format(epoch, np.mean(train_losses),
-                                                                              np.mean(dev_losses)))
-        save_name = "e_{:d}_train_loss_{:.6f}_dev_loss_{:.6f}".format(epoch, np.mean(train_losses),
-                                                                      np.mean(dev_losses))
+            dev_accs.append(acc)
+        print("Ending e{:d} AveTrainLoss:{:7.6f} AveTrainAcc{:.3f} AveDevLoss:{:7.6f} AveDecAcc:{:.3f}\r".format(epoch,
+                                                                                               np.mean(train_losses),
+                                                                                               np.mean(train_accs),
+                                                                                               np.mean(dev_losses),
+                                                                                               np.mean(dev_accs)))
+        save_name = "e_{:d}_train_loss_{:.6f}_dev_loss_{:.6f}_dev_acc_{:.3f}".format(epoch,
+                                                                                     np.mean(train_losses),
+                                                                                     np.mean(dev_losses),
+                                                                                     np.mean(dev_accs))
         if options.save_folder is not None:
-            cbilstm.save_model(os.path.join(options.save_folder, save_name + '.model'))
+            cloze_model.save_model(os.path.join(options.save_folder, save_name + '.model'))
