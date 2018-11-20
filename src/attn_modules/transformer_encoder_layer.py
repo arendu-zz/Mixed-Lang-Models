@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import Parameter
 import math
+import pdb
 
 
 class TransformerEncoderLayer(nn.Module):
@@ -120,12 +121,13 @@ class StupidAttention(nn.Module):
         #if key_padding_mask is not None:
             #key_padding_mask = key_padding_mask.unsqueeze(1)  # .unsqueeze(2)
         #attn_weights = attn_weights.float().masked_fill(key_padding_mask, float('-inf')).type_as(attn_weights)  # FP16 support: cast to float and back
-        attn_weights = attn_weights.float().masked_fill(key_padding_mask, -1e18).type_as(attn_weights)  # FP16 support: cast to float and back
+        attn_weights = attn_weights.float().masked_fill(key_padding_mask, float('-inf')).type_as(attn_weights)  # FP16 support: cast to float and back
         #pdb.set_trace()
         #rand_mask = self.rand_attn_weight_dropout(torch.ones_like(attn_weights).type_as(attn_weights))
         #attn_weights = attn_weights.float().masked_fill(rand_mask.eq(0), -1e8).type_as(attn_weights)
         attn_weights = attn_weights.view(bsz, src_len, src_len)
         attn_weights = F.softmax(attn_weights.float(), dim=-1).type_as(attn_weights)
+        #pdb.set_trace()
         #print(attn_weights[0, :, :].argmax(1), attn_weights[0, :, :].sum(1).sum().item(), src_len)
         attn = torch.bmm(attn_weights, v)
         #attn = attn.transpose(0, 1).contiguous().view(src_len, bsz, embed_dim)

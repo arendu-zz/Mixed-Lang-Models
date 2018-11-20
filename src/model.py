@@ -8,12 +8,15 @@ import numpy as np
 from torch.nn.utils.rnn import pack_padded_sequence as pack
 from torch.nn.utils.rnn import pad_packed_sequence as unpack
 from utils.utils import SPECIAL_TOKENS
+from opt.noam import NoamOpt
 
 from rewards import batch_cosine_sim
 from rewards import score_embeddings
 from rewards import prob_score_embeddings
 
 from attn_modules.transformer_encoder_layer import TransformerEncoderLayer
+
+import pdb
 
 
 def get_unsort_idx(sort_idx):
@@ -290,8 +293,8 @@ class CEncoderModel(nn.Module):
                  mode,
                  l1_dict,
                  l2_dict,
-                 dropout=0.2,
-                 max_grad_norm=10,
+                 dropout=0.3,
+                 max_grad_norm=5.,
                  size_average=False):
         super().__init__()
         self.mode = mode
@@ -304,13 +307,18 @@ class CEncoderModel(nn.Module):
         self.dropout_val = dropout
         self.dropout = nn.Dropout(self.dropout_val)
         self.max_grad_norm = max_grad_norm
+        self.emb_size = self.encoder.weight.shape[1]
+        self.emb_max = self.encoder.weight.max().item()
+        self.emb_min = self.encoder.weight.min().item()
 
     def forward(self, batcn):
         raise NotImplementedError
 
     def do_backprop(self, batch, l2_seen=None, total_batches=None):
-        self.optimizer.zero_grad()
+        self.zero_grad()
         _l, _a = self(batch)
+        if math.isnan(_l.item()):
+            print('loss is nan')
         if isinstance(self.encoder, VariationalEmbeddings):
             kl_loss = (1. / total_batches) * (self.encoder.log_q_w - self.encoder.log_p_w)
             _l += kl_loss
@@ -371,6 +379,10 @@ class CEncoderModel(nn.Module):
             self.optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()))
         elif type == 'SGD':
             self.optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.parameters()), lr=lr)
+        elif type == 'noam':
+            _optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()))
+            pdb.set_trace()
+            self.optimizer = NoamOpt(self.emb_size, 100, _optimizer)
         else:
             raise NotImplementedError("unknown optimizer option")
 
@@ -457,7 +469,7 @@ class CTransformerEncoder(CEncoderModel):
         return self.layers[0].self_attn.k_linear.weight.is_cuda
 
     def forward(self, batch):
-        lengths, l1_data, l2_data, ind = batch
+        lengths, l1_data, l2_data, ind, word_mask = batch
         batch_size, seq_len = l1_data.shape
         l1_idxs = ind.eq(1).long()
         l2_idxs = (ind - 1).lt(0).long()  # make all the -1s into 0, keep old 0s as 0
@@ -470,16 +482,16 @@ class CTransformerEncoder(CEncoderModel):
             pos_data = torch.arange(lengths[0]).expand_as(l1_data).type_as(l1_data)
             pos_data[pos_data > self.max_positional_embeddings - 1] = self.max_positional_embeddings - 1
             l1_encoded = self.encoder(l1_data)
+            rand = torch.zeros_like(l1_encoded[word_mask == 1, :]).uniform_(self.emb_min, self.emb_max)
+            rand.requires_grad = False
+            l1_encoded[word_mask == 1, :] = rand
             l1_pos_encoded = self.positional_embeddings(pos_data)
             encoded = l1_encoded + l1_pos_encoded
 
-            mask = l1_idxs.eq(0) #l1_data.eq(self.padding_idx)
-            # if self.training:
-            ones = self.dropout(torch.ones_like(l1_data).float())
-            mask[ones.eq(0)] = 1
+            diag_mask = l1_data.eq(self.l1_dict[SPECIAL_TOKENS.PAD])
             d = torch.arange(1, seq_len)
-            mask = mask.unsqueeze(1).repeat(1, seq_len, 1)
-            mask[:, d, d] = 1
+            diag_mask = diag_mask.unsqueeze(1).repeat(1, seq_len, 1)
+            diag_mask[:, d, d] = 1
 
         elif self.mode == CTransformerEncoder.L2_LEARNING:
             l1_encoded = self.encoder(l1_data)
@@ -496,7 +508,7 @@ class CTransformerEncoder(CEncoderModel):
 
         x = self.dropout(encoded)  #.transpose(0, 1)  # BS, SL, EMB -- > SL, BS, EMB
         for layer in self.layers:
-            x, attn_probs = layer(x, mask)  # all the transformer magic
+            x, attn_probs = layer(x, diag_mask)  # all the transformer magic
         final_hidden = self.dropout(x)  #x.transpose(1, 0)  # SL, BS, EMB ---> BS, SL, EMB
 
         if self.mode == CTransformerEncoder.L1_LEARNING:
@@ -526,8 +538,8 @@ class CBiLSTM(CEncoderModel):
         super().__init__(encoder, decoder, l2_encoder, l2_decoder, mode, l1_dict, l2_dict)
         self.input_size = input_size
         self.rnn_size = rnn_size
-        # self.rnn = nn.LSTM(self.input_size, self.rnn_size, dropout=dropout,
-        #                   num_layers=layers,
+        #self.rnn = nn.LSTM(self.input_size, self.rnn_size,
+        #                   num_layers=1,
         #                   batch_first=True,
         #                   bidirectional=True)
         self.fwd_rnn = nn.LSTM(self.input_size, self.rnn_size, dropout=self.dropout_val,
@@ -538,7 +550,6 @@ class CBiLSTM(CEncoderModel):
                                num_layers=layers,
                                batch_first=True,
                                bidirectional=False)
-
         #self.max_positional_embeddings = 100 #max_positional_embeddings
         #self.positional_embeddings = nn.Embedding(self.max_positional_embeddings, self.encoder.weight.shape[1])
         #self.layer_norm = nn.LayerNorm(input_size)
@@ -560,7 +571,7 @@ class CBiLSTM(CEncoderModel):
         return self.fwd_rnn.weight_hh_l0.is_cuda
 
     def forward(self, batch):
-        lengths, l1_data, l2_data, ind = batch
+        lengths, l1_data, l2_data, ind, mask = batch
         rev_idx_col = torch.zeros(l1_data.size(0), l1_data.size(1)).long()
         for _idx, l in enumerate(lengths):
             rev_idx_col[_idx, :] = torch.LongTensor(list(range(l - 1, -1, -1)) + list(range(l, lengths[0])))

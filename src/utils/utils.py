@@ -2,6 +2,7 @@
 __author__ = 'arenduchintala'
 import random
 import torch
+import pdb
 
 
 class SPECIAL_TOKENS:
@@ -99,8 +100,12 @@ class TextDataset(object):
         self.lower_text = lower_text
         self.lazy_batcher = LazyTextBatcher(corpus_file, shuffle, sort_by_len, min_batch_size)
         self.num_batches = 0
+        self.p = 0.0
         # for _ in self.lazy_batcher:
         #    self.num_batches += 1
+
+    def set_mask_rate(self, p):
+        self.p = p
 
     def __iter__(self,):
         for min_batch in self.lazy_batcher:
@@ -108,6 +113,7 @@ class TextDataset(object):
             l1_text_data = list(l1_text_data)
             lengths = [i + 2 for i in lengths]
             torch_data = torch.zeros(len(l1_text_data), lengths[0]).long()
+            mask = torch.zeros_like(torch_data)
             for _idx, l in enumerate(lengths): # range(len(lengths)):
                 if self.lower_text:
                     _tmp = [self.v2idx.get(i.lower(), self.v2idx[SPECIAL_TOKENS.UNK]) for i in

@@ -61,6 +61,15 @@ def make_wl_decoder(encoder):
     #torch.nn.init.xavier_uniform_(decoder.weight)
     return decoder
 
+def make_random_mask(data, lengths, mask_val, pad_idx):
+    drop_num = int(lengths[-1] * mask_val)
+    mask = data.eq(pad_idx)
+    if drop_num > 0:
+        drop_samples_col = torch.multinomial(torch.ones(data.shape[0], lengths[-1]), drop_num)
+        drop_samples_row = torch.arange(data.shape[0]).unsqueeze(1).expand_as(drop_samples_col)
+        mask[drop_samples_row, drop_samples_col] = 1
+    return mask
+
 
 if __name__ == '__main__':
     opt = argparse.ArgumentParser(description="write program description here")
@@ -84,6 +93,7 @@ if __name__ == '__main__':
     opt.add_argument('--batch_size', action='store', type=int, dest='batch_size', default=20)
     opt.add_argument('--gpuid', action='store', type=int, dest='gpuid', default=-1)
     opt.add_argument('--epochs', action='store', type=int, dest='epochs', default=50)
+    opt.add_argument('--mask_val', action='store', type=float, dest='mask_val', default=0.2)
     opt.add_argument('--char_composition', action='store', type=str,
                      dest='char_composition', default='None',
                      choices=set(['RNN', 'CNN', 'None', 'Variational']))
@@ -167,6 +177,7 @@ if __name__ == '__main__':
     ave_time = 0.
     s = time.time()
     total_batches = 0 #train_dataset.num_batches
+    mask_val = options.mask_val
     for epoch in range(options.epochs):
         cloze_model.train()
         train_losses = []
@@ -174,10 +185,12 @@ if __name__ == '__main__':
         for batch_idx, batch in enumerate(train_dataset):
             l, data, text_data = batch
             ind = data.ne(v2i[SPECIAL_TOKENS.PAD]).long()
+            mask = make_random_mask(data, l, mask_val, v2i[SPECIAL_TOKENS.PAD])
             if cloze_model.is_cuda():
                 data = data.cuda()
                 ind = ind.cuda()
-            cuda_batch = l, data, data, ind
+                mask = mask.cuda()
+            cuda_batch = l, data, data, ind, mask
             loss, grad_norm, acc = cloze_model.do_backprop(cuda_batch, total_batches=total_batches)
             if batch_idx % 100 == 0 and batch_idx > 0:
                 e = time.time()
@@ -201,11 +214,13 @@ if __name__ == '__main__':
         cloze_model.eval()
         for batch_idx, batch in enumerate(dev_dataset):
             l, data, text_data = batch
+            mask = make_random_mask(data, l, mask_val, v2i[SPECIAL_TOKENS.PAD])
             ind = torch.ones_like(data).long()
             if cloze_model.is_cuda():
                 data = data.cuda()
                 ind = ind.cuda()
-            cuda_batch = l, data, data, ind
+                mask = mask.cuda()
+            cuda_batch = l, data, data, ind, mask
             with torch.no_grad():
                 loss, acc = cloze_model(cuda_batch)
                 loss = loss.item()  # .data.cpu().numpy()[0]
