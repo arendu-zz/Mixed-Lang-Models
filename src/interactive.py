@@ -36,7 +36,7 @@ if __name__ == '__main__':
     opt.add_argument('--gv2spell', action='store', dest='gv2spell', required=False, default=None,
                      help='gloss vocab to index pickle obj')
     opt.add_argument('--gpuid', action='store', type=int, dest='gpuid', default=-1)
-    opt.add_argument('--cbilstm_model', action='store', dest='cbilstm_model', required=True)
+    opt.add_argument('--cloze_model', action='store', dest='cloze_model', required=True)
     opt.add_argument('--key', action='store', dest='key', required=True)
     opt.add_argument('--stochastic', action='store', dest='stochastic', default=0, type=int, choices=[0, 1])
     opt.add_argument('--beam_size', action='store', dest='beam_size', default=10, type=int)
@@ -72,15 +72,15 @@ if __name__ == '__main__':
     dataset = ParallelTextDataset(options.parallel_corpus, v2i, gv2i)
     v_max_vocab = len(v2i)
     g_max_vocab = len(gv2i) if gv2i is not None else 0
-    cbilstm = torch.load(options.cbilstm_model, map_location=lambda storage, loc: storage)
-    cbilstm.set_key(l1_key, l2_key)
-    cbilstm.init_key()
-    if isinstance(cbilstm.encoder, VarEmbedding):
+    cloze_model = torch.load(options.cloze_model, map_location=lambda storage, loc: storage)
+    cloze_model.set_key(l1_key, l2_key)
+    cloze_model.init_key()
+    if isinstance(cloze_model.encoder, VarEmbedding):
         gv2c = None
         c2i = None
-        wr = cbilstm.encoder.word_representer
+        wr = cloze_model.encoder.word_representer
         we_size = wr.we_size
-        learned_weights = cbilstm.encoder.word_representer()
+        learned_weights = cloze_model.encoder.word_representer()
         g_wr = WordRepresenter(gv2c, c2i, len(c2i), wr.ce_size,
                                c2i[PAD], wr.cr_size, we_size,
                                bidirectional=wr.bidirectional, dropout=wr.dropout,
@@ -98,36 +98,36 @@ if __name__ == '__main__':
         g_cl_decoder = make_cl_decoder(g_wr)
         encoder = make_wl_encoder(None, None, learned_weights.data.clone())
         decoder = make_wl_decoder(encoder)
-        cbilstm.encoder = encoder
-        cbilstm.decoder = decoder
-        cbilstm.g_encoder = g_cl_encoder
-        cbilstm.g_decoder = g_cl_decoder
-        cbilstm.init_param_freeze(CBiLSTM.L2_LEARNING)
+        cloze_model.encoder = encoder
+        cloze_model.decoder = decoder
+        cloze_model.l2_encoder = g_cl_encoder
+        cloze_model.l2_decoder = g_cl_decoder
+        cloze_model.init_param_freeze(CBiLSTM.L2_LEARNING)
     else:
-        learned_weights = cbilstm.encoder.weight.data.clone()
-        we_size = cbilstm.encoder.weight.size(1)
+        learned_weights = cloze_model.encoder.weight.data.clone()
+        we_size = cloze_model.encoder.weight.size(1)
         encoder = make_wl_encoder(None, None, learned_weights)
         decoder = make_wl_decoder(encoder)
         g_wl_encoder = make_wl_encoder(g_max_vocab, we_size, None)
         g_wl_decoder = make_wl_decoder(g_wl_encoder)
-        cbilstm.encoder = encoder
-        cbilstm.decoder = decoder
-        cbilstm.g_encoder = g_wl_encoder
-        cbilstm.g_decoder = g_wl_decoder
-        cbilstm.init_param_freeze(CBiLSTM.L2_LEARNING)
+        cloze_model.encoder = encoder
+        cloze_model.decoder = decoder
+        cloze_model.l2_encoder = g_wl_encoder
+        cloze_model.l2_decoder = g_wl_decoder
+        cloze_model.init_param_freeze(CBiLSTM.L2_LEARNING)
     if options.gpuid > -1:
-        cbilstm.init_cuda()
-    print(cbilstm)
+        cloze_model.init_cuda()
+    print(cloze_model)
     hist_flip_l2 = {}
     hist_limit = 1
     penalty = options.penalty  # * ( 1.0 / 8849.0)
-    if cbilstm.is_cuda:
-        sent_init_weights = cbilstm.g_encoder.weight.clone().detach().cpu()
+    if cloze_model.is_cuda:
+        sent_init_weights = cloze_model.l2_encoder.weight.clone().detach().cpu()
     else:
-        sent_init_weights = cbilstm.g_encoder.weight.clone().detach()
+        sent_init_weights = cloze_model.l2_encoder.weight.clone().detach()
 
     for batch_idx, batch in enumerate(dataset):
-        old_g = cbilstm.g_encoder.weight.clone()
+        old_g = cloze_model.l2_encoder.weight.clone()
         lens, l1_data, l2_data, l1_text_data, l2_text_data = batch
         l1_tokens = [SPECIAL_TOKENS.BOS] + l1_text_data[0].strip().split() + [SPECIAL_TOKENS.EOS] # [i2v[i.item()] for i in l1_data[0, :]]
         l2_tokens = [SPECIAL_TOKENS.BOS] + l2_text_data[0].strip().split() + [SPECIAL_TOKENS.EOS] # [i2gv[i.item()] for i in l2_data[0, :]]
@@ -156,25 +156,25 @@ if __name__ == '__main__':
             if options.verbose:
                 print(new_macaronic)
             init_score, _ = apply_swap(macaronic_0,
-                                       cbilstm,
+                                       cloze_model,
                                        sent_init_weights)
             print('init score', init_score)
             swap_score, new_weights = apply_swap(new_macaronic,
-                                                 cbilstm,
+                                                 cloze_model,
                                                  sent_init_weights)
             print('swap score', swap_score)
             go_next = input('next line or retry (n/r):')
             go_next = go_next == 'n'
             if go_next:
                 print('going to next...')
-                if cbilstm.is_cuda:
-                    sent_init_weights = cbilstm.g_encoder.weight.clone().detach().cpu()
+                if cloze_model.is_cuda:
+                    sent_init_weights = cloze_model.l2_encoder.weight.clone().detach().cpu()
                 else:
-                    sent_init_weights = cbilstm.g_encoder.weight.clone().detach()
+                    sent_init_weights = cloze_model.l2_encoder.weight.clone().detach()
             else:
                 #g_wl_encoder = make_wl_encoder(max_vocab, we_size, old_g.data.clone())
                 #g_wl_decoder = make_wl_decoder(max_vocab, we_size, g_wl_encoder)
-                #cbilstm.g_encoder = g_wl_encoder
-                #cbilstm.g_decoder = g_wl_decoder
-                #cbilstm.init_param_freeze(CBiLSTM.L2_LEARNING)
+                #cloze_model.l2_encoder = g_wl_encoder
+                #cloze_model.l2_decoder = g_wl_decoder
+                #cloze_model.init_param_freeze(CBiLSTM.L2_LEARNING)
                 pass

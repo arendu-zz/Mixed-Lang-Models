@@ -94,17 +94,25 @@ class StupidAttention(nn.Module):
         super().__init__()
         self.embed_dim = embed_dim
         self.attn_weight_dropout = nn.Dropout(dropout)
-        self.rand_attn_weight_dropout = nn.Dropout(dropout)
-        #self.q_linear = Linear(self.embed_dim, self.embed_dim)
-        self.k_linear = Linear(self.embed_dim, self.embed_dim)
-        #self.v_linear = Linear(self.embed_dim, self.embed_dim)
-        #self.out_proj = Linear(self.embed_dim, self.embed_dim)
+        self.q_linear = nn.Sequential(
+                Linear(self.embed_dim, self.embed_dim // 4),
+                nn.ReLU(),
+                Linear(self.embed_dim // 4, self.embed_dim))
+        self.k_linear = nn.Sequential(
+                Linear(self.embed_dim, self.embed_dim // 4),
+                nn.ReLU(),
+                Linear(self.embed_dim // 4, self.embed_dim))
+        self.v_linear = nn.Sequential(
+                Linear(self.embed_dim, self.embed_dim // 4),
+                nn.ReLU(),
+                Linear(self.embed_dim // 4, self.embed_dim))
+        self.out_proj = Linear(self.embed_dim, self.embed_dim)
 
     def forward(self, query, key, value, key_padding_mask):
         bsz, src_len, embed_dim = query.shape
-        q = query  # self.q_linear(query)
+        q = self.q_linear(query)
         k = self.k_linear(key)
-        v = value
+        v = self.v_linear(value)
         #q = self.q_linear(query).transpose(0, 1)
         #q = query.transpose(0, 1) #self.q_linear(query).transpose(0, 1)
         #k = self.k_linear(key).transpose(0, 1)
@@ -131,7 +139,7 @@ class StupidAttention(nn.Module):
         #print(attn_weights[0, :, :].argmax(1), attn_weights[0, :, :].sum(1).sum().item(), src_len)
         attn = torch.bmm(attn_weights, v)
         #attn = attn.transpose(0, 1).contiguous().view(src_len, bsz, embed_dim)
-        #attn = self.out_proj(attn)
+        attn = self.out_proj(attn)
         return attn, attn_weights
 
 class MultiheadAttention(nn.Module):

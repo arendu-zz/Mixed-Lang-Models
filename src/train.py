@@ -19,6 +19,8 @@ from model import WordRepresenter
 from utils.utils import TextDataset
 from utils.utils import SPECIAL_TOKENS
 
+import pdb
+
 
 def make_vl_encoder(mean, rho, sigma_prior):
     print('making VariationalEmbeddings with', sigma_prior)
@@ -71,6 +73,19 @@ def make_random_mask(data, lengths, mask_val, pad_idx):
     return mask
 
 
+def word_emb_quality(encoder, idx2voc):
+    print('--------------------------word-emb---------------------')
+    l1_weights = encoder.weight.data
+    l1_l1 = l1_weights.matmul(l1_weights.transpose(0, 1))
+    _, l1_l1_topk_idx = torch.topk(l1_l1, 10)
+    for i in list(range(50)) + list(range(1000, 1050)) + list(range(10000, 10050)):
+        if i in idx2voc:
+            v = idx2voc[i]
+            k = ' '.join([idx2voc[j] for j in l1_l1_topk_idx[i].tolist()])
+            print(v + ':' + k)
+    print('------------------------------------------------------')
+
+
 if __name__ == '__main__':
     opt = argparse.ArgumentParser(description="write program description here")
     # insert options here
@@ -115,6 +130,8 @@ if __name__ == '__main__':
         print("using CPU")
 
     v2i = pickle.load(open(options.v2i, 'rb'))
+    i2v = {v: k for k, v in v2i.items()}
+    assert len(v2i) == len(i2v)
     v2c = pickle.load(open(options.v2spell, 'rb'))
     c2i = pickle.load(open(options.c2i, 'rb'))
 
@@ -178,6 +195,7 @@ if __name__ == '__main__':
     s = time.time()
     total_batches = 0 #train_dataset.num_batches
     mask_val = options.mask_val
+    early_stops = []
     for epoch in range(options.epochs):
         cloze_model.train()
         train_losses = []
@@ -210,6 +228,7 @@ if __name__ == '__main__':
         total_batches = batch_idx
         dev_losses = []
         dev_accs = []
+        word_emb_quality(cloze_model.encoder, i2v)
         assert options.dev_corpus is not None
         cloze_model.eval()
         for batch_idx, batch in enumerate(dev_dataset):
@@ -226,14 +245,24 @@ if __name__ == '__main__':
                 loss = loss.item()  # .data.cpu().numpy()[0]
             dev_losses.append(loss)
             dev_accs.append(acc)
+
+        dev_acc_mu = np.mean(dev_accs)
+        dev_losses_mu = np.mean(dev_losses)
+        train_acc_mu = np.mean(train_accs)
+        train_losses_mu = np.mean(train_losses)
         print("Ending e{:d} AveTrainLoss:{:7.6f} AveTrainAcc{:.3f} AveDevLoss:{:7.6f} AveDecAcc:{:.3f}\r".format(epoch,
-                                                                                               np.mean(train_losses),
-                                                                                               np.mean(train_accs),
-                                                                                               np.mean(dev_losses),
-                                                                                               np.mean(dev_accs)))
+                                                                                                       train_losses_mu,
+                                                                                                       train_acc_mu,
+                                                                                                       dev_losses_mu,
+                                                                                                       dev_acc_mu))
         save_name = "e_{:d}_train_loss_{:.6f}_dev_loss_{:.6f}_dev_acc_{:.3f}".format(epoch,
-                                                                                     np.mean(train_losses),
-                                                                                     np.mean(dev_losses),
-                                                                                     np.mean(dev_accs))
+                                                                                     train_losses_mu,
+                                                                                     dev_losses_mu,
+                                                                                     dev_acc_mu)
         if options.save_folder is not None:
             cloze_model.save_model(os.path.join(options.save_folder, save_name + '.model'))
+        if epoch > 5 and dev_losses_mu > max(early_stops[-3:]):
+            print('early stopping...')
+            exit()
+        else:
+            early_stops.append(dev_losses_mu)

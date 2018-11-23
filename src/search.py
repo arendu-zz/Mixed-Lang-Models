@@ -21,6 +21,8 @@ import time
 from utils.utils import ParallelTextDataset
 from utils.utils import SPECIAL_TOKENS, TEXT_EFFECT
 
+import pdb
+
 global NEXT_SENT
 NEXT_SENT = (-1, None)
 
@@ -341,18 +343,13 @@ def apply_swap(macaronic_config, model, weights, max_steps=1, improvement_thresh
     indicator = torch.LongTensor([1] * l1_data.size(1)).unsqueeze(0)
     indicator[:, swap_ind] = 2
     if model.is_cuda():
-        #macaronic_d = macaronic_d.cuda()
         l1_data = l1_data.cuda()
         l2_data = l2_data.cuda()
         indicator = indicator.cuda()
         mask = make_random_mask(l1_data, [l1_data.size(1)], 0.0, 0)
-        #flip_l2 = flip_l2.cuda()
-        #flip_l2_offset = flip_l2_offset.cuda()
         flip_l2_set = flip_l2_set.cuda()
-
     var_batch = [l1_data.size(1)], l1_data, l2_data, indicator, mask
     model.update_g_weights(weights)
-    model.train()
     model.init_param_freeze(CBiLSTM.L2_LEARNING)
     model.init_optimizer(type='SGD')
 
@@ -365,8 +362,7 @@ def apply_swap(macaronic_config, model, weights, max_steps=1, improvement_thresh
         num_steps += 1
         #improvement = prev_loss - loss
         #prev_loss = loss
-    #    print(num_steps, 'step score', step_score_vocabtype, 'loss', loss)
-    #step_score_vocabtype = model.score_embeddings(l2_key, l1_key)
+        #print(num_steps, 'step score', step_score_vocabtype, 'loss', loss)
     new_weights = model.l2_encoder.weight.clone().detach().cpu()
     return step_score_vocabtype, new_weights
 
@@ -387,12 +383,13 @@ def make_start_state(i2v, i2gv, init_weights, model, dl, **kwargs):
                                set([]), [],
                                kwargs['swap_limit'])
         macaronic_sentences.append(ms)
-        #if len(macaronic_sentences) > 2:
+        #if len(macaronic_sentences) > 0:
         #    break
     state = MacaronicState(macaronic_sentences, 0, model, score_0, kwargs['binary_branching'])
     state.weights = init_weights
     state.score = score_0
     return state
+
 
 def beam_search(init_state, **kwargs):
     beam_size = kwargs['beam_size']
@@ -401,9 +398,11 @@ def beam_search(init_state, **kwargs):
     q = PriorityQ(beam_size)
     q.append(init_state)
     while q.length() > 0:
+        print(q.length())
         curr_state = q.pop(kwargs['stochastic'] == 1)
         if 'verbose' in kwargs and kwargs['verbose']:
-            print('curr_state\n', str(curr_state))
+            #print('curr_state\n', str(curr_state))
+            pass
         if curr_state.score >= best_state.score:
             best_state = curr_state
         actions, action_weights = curr_state.possible_actions()
@@ -474,6 +473,8 @@ if __name__ == '__main__':
     dataset = ParallelTextDataset(options.parallel_corpus, v2i, gv2i)
     v_max_vocab = len(v2i)
     g_max_vocab = len(gv2i)
+    ff = [(i2v[i], i2gv[j]) for i, j in zip(l1_key.tolist(), l2_key.tolist())]
+    pdb.set_trace()
     cloze_model = torch.load(options.cloze_model, map_location=lambda storage, loc: storage)
 
     if isinstance(cloze_model.encoder, VarEmbedding):
@@ -519,6 +520,9 @@ if __name__ == '__main__':
         cloze_model.init_cuda()
     cloze_model.set_key(l1_key, l2_key)
     cloze_model.init_key()
+    cloze_model.l2_dict = gv2i
+    if isinstance(cloze_model, CBiLSTM):
+        cloze_model.train()
     print(cloze_model)
     macaronic_sents = []
     if cloze_model.is_cuda:
