@@ -23,11 +23,12 @@ class TransformerEncoderLayer(nn.Module):
 
     def __init__(self,
                  embed_dim,
-                 encoder_ffn_embed_dim,
+                 embed_bottleneck,
                  attn_heads,
-                 attn_dropout=0.2):
+                 attn_dropout):
         super().__init__()
         self.embed_dim = embed_dim  # args.encoder_embed_dim
+        self.embed_bottleneck = embed_bottleneck 
         self.attn_dropout = attn_dropout
         #self.self_attn = MultiheadAttention(
         #    self.embed_dim, args.encoder_attention_heads,
@@ -37,7 +38,7 @@ class TransformerEncoderLayer(nn.Module):
         #    self.embed_dim, attn_heads,
         #    dropout=attn_dropout,
         #)
-        self.self_attn = StupidAttention(self.embed_dim, self.attn_dropout)
+        self.self_attn = StupidAttention(self.embed_dim, self.embed_bottleneck, self.attn_dropout)
         #self.relu_dropout = relu_dropout
         self.layer_norm = LayerNorm(self.embed_dim)
         #self.fc1 = Linear(self.embed_dim, encoder_ffn_embed_dim)
@@ -90,29 +91,33 @@ def LayerNorm(embedding_dim):
 
 
 class StupidAttention(nn.Module):
-    def __init__(self, embed_dim, dropout=0.1, bias=True):
+    def __init__(self, embed_dim, embed_bottleneck, dropout=0.1, bias=True):
         super().__init__()
         self.embed_dim = embed_dim
+        self.embed_bottleneck = embed_bottleneck
         self.attn_weight_dropout = nn.Dropout(dropout)
-        self.q_linear = nn.Sequential(
-                Linear(self.embed_dim, self.embed_dim // 4),
-                nn.ReLU(),
-                Linear(self.embed_dim // 4, self.embed_dim))
+        #self.q_linear = nn.Sequential(
+        #        Linear(self.embed_dim, self.embed_bottleneck),
+        #        nn.LeakyReLU(0.2),
+        #        Linear(self.embed_bottleneck, self.embed_dim))
         self.k_linear = nn.Sequential(
-                Linear(self.embed_dim, self.embed_dim // 4),
-                nn.ReLU(),
-                Linear(self.embed_dim // 4, self.embed_dim))
-        self.v_linear = nn.Sequential(
-                Linear(self.embed_dim, self.embed_dim // 4),
-                nn.ReLU(),
-                Linear(self.embed_dim // 4, self.embed_dim))
-        self.out_proj = Linear(self.embed_dim, self.embed_dim)
+                Linear(self.embed_dim, self.embed_bottleneck),
+                Linear(self.embed_bottleneck, self.embed_dim))
+        #self.k_linear = nn.Sequential(
+        #        Linear(self.embed_dim, self.embed_bottleneck),
+        #        nn.LeakyReLU(0.2),
+        #        Linear(self.embed_bottleneck, self.embed_dim))
+        #self.v_linear = nn.Sequential(
+        #        Linear(self.embed_dim, self.embed_bottleneck),
+        #        nn.LeakyReLU(0.2),
+        #        Linear(self.embed_bottleneck, self.embed_dim))
+        #self.out_proj = Linear(self.embed_dim, self.embed_dim)
 
     def forward(self, query, key, value, key_padding_mask):
         bsz, src_len, embed_dim = query.shape
-        q = self.q_linear(query)
+        q = query #self.q_linear(query)
         k = self.k_linear(key)
-        v = self.v_linear(value)
+        v = value #self.v_linear(value)
         #q = self.q_linear(query).transpose(0, 1)
         #q = query.transpose(0, 1) #self.q_linear(query).transpose(0, 1)
         #k = self.k_linear(key).transpose(0, 1)
@@ -139,7 +144,7 @@ class StupidAttention(nn.Module):
         #print(attn_weights[0, :, :].argmax(1), attn_weights[0, :, :].sum(1).sum().item(), src_len)
         attn = torch.bmm(attn_weights, v)
         #attn = attn.transpose(0, 1).contiguous().view(src_len, bsz, embed_dim)
-        attn = self.out_proj(attn)
+        #attn = self.out_proj(attn)
         return attn, attn_weights
 
 class MultiheadAttention(nn.Module):

@@ -28,7 +28,7 @@ class Preprocess(object):
 
 
     def build(self, l1_data_dir, l2_data_dir, l2_save_dir):
-        #l1_vocab = pickle.load(open(os.path.join(l1_data_dir, 'l1.vocab.pkl'), 'rb'))
+        l1_vocab = pickle.load(open(os.path.join(l1_data_dir, 'l1.vocab.pkl'), 'rb'))
         #l1_idx2v = pickle.load(open(os.path.join(l1_data_dir, 'l1.idx2v.pkl'), 'rb'))
         l1_v2idx = pickle.load(open(os.path.join(l1_data_dir, 'l1.v2idx.pkl'), 'rb'))
         #l1_vidx2spelling = pickle.load(open(os.path.join(l1_data_dir, 'l1.vidx2spelling.pkl'), 'rb'))

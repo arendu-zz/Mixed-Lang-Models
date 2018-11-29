@@ -8,16 +8,19 @@ import random
 import time
 import torch
 
-from model import CBiLSTM
-from model import CTransformerEncoder
-from model import VarEmbedding
-from model import VariationalEmbeddings
-from model import VarLinear
-from model import VariationalLinear
-from model import WordRepresenter
+from src.utils.utils import SPECIAL_TOKENS
+from src.utils.utils import TextDataset
+from src.opt.noam import NoamOpt
 
-from utils.utils import TextDataset
-from utils.utils import SPECIAL_TOKENS
+from src.models.model import CBiLSTM
+from src.models.model import CBiLSTMFast
+from src.models.map_model import CBiLSTMFastMap
+from src.models.model import CTransformerEncoder
+from src.models.model import VarEmbedding
+from src.models.model import VariationalEmbeddings
+from src.models.model import VarLinear
+from src.models.model import VariationalLinear
+from src.models.model import WordRepresenter
 
 import pdb
 
@@ -100,7 +103,7 @@ if __name__ == '__main__':
     opt.add_argument('--c2i', action='store', dest='c2i', required=True,
                      help='character (corpus and gloss)  to index pickle obj')
     opt.add_argument('--model_type', action='store', dest='model_type', default='lstm',
-                     choices=set(['lstm', 'transformer']), help='type of contextual model to use')
+                     choices=set(['lstmfastmap', 'lstmfast', 'lstm', 'transformer']), help='type of contextual model to use')
     opt.add_argument('--w_embedding_size', action='store', type=int, dest='w_embedding_size', default=500)
     opt.add_argument('--layers', action='store', type=int, dest='layers', default=1)
     opt.add_argument('--model_size', action='store', type=int, dest='model_size', default=250)
@@ -109,6 +112,8 @@ if __name__ == '__main__':
     opt.add_argument('--gpuid', action='store', type=int, dest='gpuid', default=-1)
     opt.add_argument('--epochs', action='store', type=int, dest='epochs', default=50)
     opt.add_argument('--mask_val', action='store', type=float, dest='mask_val', default=0.2)
+    opt.add_argument('--positional_encoding', action='store', type=str, dest='positional_encoding', default='None',
+                     choices=['sinusoidal', 'learned', 'none'])
     opt.add_argument('--char_composition', action='store', type=str,
                      dest='char_composition', default='None',
                      choices=set(['RNN', 'CNN', 'None', 'Variational']))
@@ -116,6 +121,10 @@ if __name__ == '__main__':
                      required=False, choices=set([0, 1]))
     opt.add_argument('--lsp', action='store', type=float, dest='lsp', default=0.)
     opt.add_argument('--seed', action='store', dest='seed', default=1234, type=int)
+    opt.add_argument('--use_pos_embeddings', action='store', dest='use_pos_embeddings', default=0, type=int,
+                     help='use positional embeddings', choices=set([0, 1]))
+    opt.add_argument('--use_early_stop', action='store', dest='use_early_stop', default=1, type=int, choices=set([0, 1]))
+    opt.add_argument('--disp_nearest_neighbors', action='store', dest='disp_nearest_neighbors', default=1, type=int, choices=set([0, 1]))
     options = opt.parse_args()
     print(options)
     torch.manual_seed(options.seed)
@@ -149,9 +158,19 @@ if __name__ == '__main__':
         if options.model_type == 'lstm':
             cloze_model = CBiLSTM(options.w_embedding_size, options.model_size, options.layers,
                                   encoder, decoder, None, None, mode=CBiLSTM.L1_LEARNING, l1_dict=v2i, l2_dict=None)
+        elif options.model_type == 'lstmfast':
+            cloze_model = CBiLSTMFast(options.w_embedding_size, options.model_size, options.layers,
+                                      encoder, decoder, None, None, mode=CBiLSTM.L1_LEARNING, l1_dict=v2i, l2_dict=None)
+        elif options.model_type == 'lstmfastmap':
+            cloze_model = CBiLSTMFastMap(options.w_embedding_size, options.model_size, options.layers,
+                                         encoder, decoder, mode=CBiLSTM.L1_LEARNING,
+                                         l1_dict=v2i, l2_dict=None)
         elif options.model_type == 'transformer':
             cloze_model = CTransformerEncoder(options.w_embedding_size, options.model_size, options.layers,
-                                              encoder, decoder, None, None, mode=CTransformerEncoder.L1_LEARNING, l1_dict=v2i, l2_dict=None)
+                                              encoder, decoder, None, None,
+                                              mode=CTransformerEncoder.L1_LEARNING,
+                                              l1_dict=v2i, l2_dict=None,
+                                              positional_embeddings_type=options.positional_encoding)
         else:
             raise NotImplementedError("unknown model type")
     elif options.char_composition == 'Variational':
@@ -167,13 +186,18 @@ if __name__ == '__main__':
         if options.model_type == 'lstm':
             cloze_model = CBiLSTM(options.w_embedding_size, options.model_size, options.layers,
                                   encoder, decoder, None, None, mode=CBiLSTM.L1_LEARNING, l1_dict=v2i, l2_dict=None)
+        elif options.model_type == 'lstmfast':
+            cloze_model = CBiLSTM(options.w_embedding_size, options.model_size, options.layers,
+                                  encoder, decoder, None, None, mode=CBiLSTM.L1_LEARNING, l1_dict=v2i, l2_dict=None)
         elif options.model_type == 'transformer':
             cloze_model = CTransformerEncoder(options.w_embedding_size, options.model_size, options.layers,
                                               encoder, decoder, None, None, mode=CTransformerEncoder.L1_LEARNING,
-                                              l1_dict=v2i, l2_dict=None)
+                                              l1_dict=v2i, l2_dict=None,
+                                              positional_embeddings_type=options.positional_encoding)
         else:
             raise NotImplementedError("unknown model type")
     else:
+        raise NotImplementedError("unknown model type")
         wr = WordRepresenter(v2c, c2i, len(c2i), options.c_embedding_size, c2i[SPECIAL_TOKENS.PAD],
                              options.w_embedding_size // (2 if options.char_bidirectional else 1),
                              options.w_embedding_size,
@@ -186,7 +210,7 @@ if __name__ == '__main__':
         cl_decoder = make_cl_decoder(wr)
         cloze_model = CBiLSTM(options.w_embedding_size, options.model_size, options.layers,
                               cl_encoder, cl_decoder, None, None, mode=CBiLSTM.L1_LEARNING,
-                              l1_dict=v2i,l2_dict=None)
+                              l1_dict=v2i, l2_dict=None)
     if options.gpuid > -1:
         cloze_model.init_cuda()
 
@@ -221,14 +245,15 @@ if __name__ == '__main__':
                                                                                            acc,
                                                                                            ave_time))
             else:
-                #print("e{:d} b{:d}/{:d} loss:{:7.6f} acc:{:.3f}\r".format(epoch, batch_idx + 1, total_batches, loss, acc))
+                print("e{:d} b{:d}/{:d} loss:{:7.6f} acc:{:.3f}\r".format(epoch, batch_idx + 1, total_batches, loss, acc))
                 pass
             train_losses.append(loss)
             train_accs.append(acc)
         total_batches = batch_idx
         dev_losses = []
         dev_accs = []
-        word_emb_quality(cloze_model.encoder, i2v)
+        if options.disp_nearest_neighbors == 1:
+            word_emb_quality(cloze_model.encoder, i2v)
         assert options.dev_corpus is not None
         cloze_model.eval()
         for batch_idx, batch in enumerate(dev_dataset):
@@ -261,8 +286,9 @@ if __name__ == '__main__':
                                                                                      dev_acc_mu)
         if options.save_folder is not None:
             cloze_model.save_model(os.path.join(options.save_folder, save_name + '.model'))
-        if epoch > 5 and dev_losses_mu > max(early_stops[-3:]):
-            print('early stopping...')
-            exit()
-        else:
-            early_stops.append(dev_losses_mu)
+        if options.use_early_stop == 1:
+            if epoch > 5 and dev_losses_mu > max(early_stops[-3:]):
+                print('early stopping...')
+                exit()
+            else:
+                early_stops.append(dev_losses_mu)
