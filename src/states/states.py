@@ -69,7 +69,7 @@ class MacaronicState(object):
         s.append('possible_children:' + str(len(actions)))
         s.append('weightid         :' + str(id(self.weights)))
         s.append('is_terminal      :' + str(self.terminal))
-        s.append('root_score       :' + str(self.start_score))
+        s.append('start_score       :' + str(self.start_score))
         s.append('score            :' + str(self.score))
         return '\n'.join(s)
 

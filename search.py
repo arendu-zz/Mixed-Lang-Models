@@ -1,13 +1,11 @@
 #!/usr/bin/env python
 import argparse
-import copy
 import numpy as np
 from operator import attrgetter
 import pickle
 import sys
 import torch
 import random
-import pdb
 
 from src.models.model import CBiLSTM
 from src.models.model import CBiLSTMFast
@@ -18,10 +16,10 @@ from src.models.model import WordRepresenter
 from src.states.states import MacaronicState
 from src.states.states import PriorityQ
 from src.states.states import MacaronicSentence
-from train import make_cl_decoder
-from train import make_cl_encoder
-from train import make_wl_decoder
-from train import make_wl_encoder
+from src.models.model import make_cl_decoder
+from src.models.model import make_cl_encoder
+from src.models.model import make_wl_decoder
+from src.models.model import make_wl_encoder
 from train import make_random_mask
 import time
 
@@ -103,7 +101,7 @@ def make_start_state(i2v, i2gv, init_weights, model, dl, **kwargs):
                                set([]), [],
                                kwargs['swap_limit'])
         macaronic_sentences.append(ms)
-        if len(macaronic_sentences) > 0:
+        if len(macaronic_sentences) > 1000:
             break
     state = MacaronicState(macaronic_sentences, 0, model, score_0, kwargs['binary_branching'])
     state.weights = init_weights
@@ -158,6 +156,7 @@ if __name__ == '__main__':
     opt.add_argument('--cloze_model', action='store', dest='cloze_model', required=True)
     opt.add_argument('--key', action='store', dest='key', required=True)
     opt.add_argument('--stochastic', action='store', dest='stochastic', default=0, type=int, choices=[0, 1])
+    opt.add_argument('--joined_l2_l1', action='store', dest='joined_l2_l1', default=0, type=int, choices=[0, 1])
     opt.add_argument('--beam_size', action='store', dest='beam_size', default=10, type=int)
     opt.add_argument('--swap_limit', action='store', dest='swap_limit', default=0.3, type=float)
     opt.add_argument('--max_search_depth', action='store', dest='max_search_depth', default=10000, type=int)
@@ -260,6 +259,10 @@ if __name__ == '__main__':
         cloze_model.init_param_freeze(CBiLSTM.L2_LEARNING)
     else:
         raise NotImplementedError("unknown cloze_model" + str(type(cloze_model)))
+
+    if options.joined_l2_l1:
+        assert not isinstance(cloze_model, CBiLSTMFastMap)
+        cloze_model.join_l2_weights()
 
     if options.gpuid > -1:
         cloze_model.init_cuda()

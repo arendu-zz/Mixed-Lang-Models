@@ -15,6 +15,7 @@ from src.rewards import batch_cosine_sim
 from src.rewards import score_embeddings
 from src.rewards import prob_score_embeddings
 
+
 from .transformer_encoder_layer import TransformerEncoderLayer
 
 def get_unsort_idx(sort_idx):
@@ -22,9 +23,51 @@ def get_unsort_idx(sort_idx):
     return unsort_idx
 
 
+def make_vl_encoder(mean, rho, sigma_prior):
+    print('making VariationalEmbeddings with', sigma_prior)
+    variational_embedding = VariationalEmbeddings(mean, rho, sigma_prior)
+    return variational_embedding
+
+
+def make_vl_decoder(mean, rho):
+    variational_linear = VariationalLinear(mean, rho)
+    return variational_linear
+
+
+def make_cl_encoder(word_representer):
+    e = VarEmbedding(word_representer)
+    return e
+
+
+def make_cl_decoder(word_representer):
+    d = VarLinear(word_representer)
+    return d
+
+
+def make_wl_encoder(vocab_size=None, embedding_size=None, wt=None):
+    if wt is None:
+        assert vocab_size is not None
+        assert embedding_size is not None
+        e = torch.nn.Embedding(vocab_size, embedding_size)
+        torch.nn.init.xavier_uniform_(e.weight)
+        #e.weight = torch.nn.Parameter(torch.FloatTensor(vocab_size, embedding_size).uniform_(-0.01 / embedding_size,
+        #                                                                                     0.01 / embedding_size))
+    else:
+        e = torch.nn.Embedding(wt.size(0), wt.size(1))
+        e.weight = torch.nn.Parameter(wt)
+    return e
+
+
+def make_wl_decoder(encoder):
+    decoder = torch.nn.Linear(encoder.weight.size(1), encoder.weight.size(0), bias=False)
+    decoder.weight = encoder.weight
+    #torch.nn.init.xavier_uniform_(decoder.weight)
+    return decoder
+
+
 class SinusoidalPositionalEncoding(nn.Module):
     "Implement the PE function."
-    def __init__(self,  max_len, embed_size):
+    def __init__(self, max_len, embed_size):
         super(SinusoidalPositionalEncoding, self).__init__()
         # Compute the positional encodings once in log space.
         pe = torch.zeros(max_len, embed_size)
@@ -36,7 +79,7 @@ class SinusoidalPositionalEncoding(nn.Module):
         self.pe = nn.Embedding(max_len, embed_size)
         self.pe.weight.data = pe
         self.pe.weight.requires_grad = False
-        
+
     def forward(self, x):
         print(x.shape)
         pos = torch.arange(x.shape[1]).expand_as(x).type_as(x)
@@ -247,13 +290,6 @@ def log_gaussian(x, mu, sigma, log_sigma):
     #return -0.5 * np.log(2 * np.pi) - torch.log(sigma) - (x - mu) ** 2 / (2 * sigma ** 2)
     return s
 
-#def log_gaussian(x, mu, sigma):
-#    return float(-0.5 * np.log(2 * np.pi) - np.log(np.abs(sigma))) - (x - mu)**2 / (2 * sigma**2)
-
-
-#def log_gaussian_logsigma(x, mu, logsigma):
-#    return float(-0.5 * np.log(2 * np.pi)) - logsigma - (x - mu)**2 / (2 * torch.exp(logsigma)**2)
-
 
 class VariationalEmbeddings(nn.Module):
     def __init__(self, mean, rho, sigma_prior=1.):
@@ -325,6 +361,7 @@ class VariationalLinear(nn.Module):
         else:
             raise BaseException("data should be at least 2 dimensional")
 
+
 class CEncoderModel(nn.Module):
     L1_LEARNING = 'L1_LEARNING'  # updates only l1 params i.e. base language model
     L12_LEARNING = 'L12_LEARNING'  # updates both l1 params and l2 params (novel vocab embeddings)
@@ -358,6 +395,20 @@ class CEncoderModel(nn.Module):
         self.emb_min = self.encoder.weight.min().item()
         self.use_positional_embeddings = use_positional_embeddings
 
+    def join_l2_weights(self,):
+        #print(id(self.encoder.weight))
+        #print(id(self.decoder.weight))
+        #print(id(self.l2_encoder.weight))
+        #print(id(self.l2_decoder.weight))
+        l1_wt = self.encoder.weight.data.clone()
+        l2_wt = self.l2_encoder.weight.data.clone()
+        l2_l1_wt = torch.cat([l2_wt, l1_wt], dim=0)
+        self.l2_encoder = make_wl_encoder(None, None, l2_l1_wt)
+        self.l2_decoder = make_wl_decoder(self.l2_encoder)
+        #print(id(self.l2_encoder.weight))
+        #print(id(self.l2_decoder.weight))
+        return True
+
     def forward(self, batcn):
         raise NotImplementedError
 
@@ -374,9 +425,6 @@ class CEncoderModel(nn.Module):
             keep_grad = torch.zeros_like(self.l2_encoder.weight.grad)
             keep_grad[l2_seen, :] = 1.0
             self.l2_encoder.weight.grad *= keep_grad
-        if self.mode == CEncoderModel.L1_LEARNING:
-            pass
-
         grad_norm = torch.nn.utils.clip_grad_norm_(filter(lambda p: p.requires_grad, self.parameters()),
                                                    self.max_grad_norm)
         if math.isnan(grad_norm):
@@ -387,10 +435,6 @@ class CEncoderModel(nn.Module):
         #del _l
         #del batch
         return loss, grad_norm, _a
-
-    def score_embs(self,):
-        l1_weights = self.encoder.weight.data
-        l2_weights = self.l2_encoder.weight.data
 
     def init_param_freeze(self, mode):
         self.mode = mode
@@ -477,7 +521,6 @@ class CEncoderModel(nn.Module):
         self.l2_decoder.weight.data = weights
 
     def score_embeddings(self,):
-        self.score_embs()
         if isinstance(self.encoder, VarEmbedding):
             raise NotImplementedError("only word level scores")
         else:
@@ -609,6 +652,7 @@ class CTransformerEncoder(CEncoderModel):
             loss = l1_loss + l2_loss
             acc = None  # TODO
         return loss, acc
+
 
 class CBiLSTMFast(CEncoderModel):
 

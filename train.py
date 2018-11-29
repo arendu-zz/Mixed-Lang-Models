@@ -16,55 +16,12 @@ from src.models.model import CBiLSTM
 from src.models.model import CBiLSTMFast
 from src.models.map_model import CBiLSTMFastMap
 from src.models.model import CTransformerEncoder
-from src.models.model import VarEmbedding
-from src.models.model import VariationalEmbeddings
-from src.models.model import VarLinear
-from src.models.model import VariationalLinear
-from src.models.model import WordRepresenter
-
-import pdb
-
-
-def make_vl_encoder(mean, rho, sigma_prior):
-    print('making VariationalEmbeddings with', sigma_prior)
-    variational_embedding = VariationalEmbeddings(mean, rho, sigma_prior)
-    return variational_embedding
-
-
-def make_vl_decoder(mean, rho):
-    variational_linear = VariationalLinear(mean, rho)
-    return variational_linear
-
-
-def make_cl_encoder(word_representer):
-    e = VarEmbedding(word_representer)
-    return e
-
-
-def make_cl_decoder(word_representer):
-    d = VarLinear(word_representer)
-    return d
-
-
-def make_wl_encoder(vocab_size=None, embedding_size=None, wt=None):
-    if wt is None:
-        assert vocab_size is not None
-        assert embedding_size is not None
-        e = torch.nn.Embedding(vocab_size, embedding_size)
-        torch.nn.init.xavier_uniform_(e.weight)
-        #e.weight = torch.nn.Parameter(torch.FloatTensor(vocab_size, embedding_size).uniform_(-0.01 / embedding_size,
-        #                                                                                     0.01 / embedding_size))
-    else:
-        e = torch.nn.Embedding(wt.size(0), wt.size(1))
-        e.weight = torch.nn.Parameter(wt)
-    return e
-
-
-def make_wl_decoder(encoder):
-    decoder = torch.nn.Linear(encoder.weight.size(1), encoder.weight.size(0), bias=False)
-    decoder.weight = encoder.weight
-    #torch.nn.init.xavier_uniform_(decoder.weight)
-    return decoder
+from src.models.model import make_cl_encoder
+from src.models.model import make_cl_decoder
+from src.models.model import make_vl_encoder
+from src.models.model import make_vl_decoder
+from src.models.model import make_wl_encoder
+from src.models.model import make_wl_decoder
 
 def make_random_mask(data, lengths, mask_val, pad_idx):
     drop_num = int(lengths[-1] * mask_val)

@@ -10,14 +10,11 @@ from src.models.map_model import CBiLSTMFastMap
 from src.models.model import CTransformerEncoder
 from src.models.model import VarEmbedding
 from src.models.model import WordRepresenter
-from src.states.states import MacaronicState
-from src.states.states import PriorityQ
 from src.states.states import MacaronicSentence
-from train import make_cl_decoder
-from train import make_cl_encoder
-from train import make_wl_decoder
-from train import make_wl_encoder
-from train import make_random_mask
+from src.models.make import make_cl_decoder
+from src.models.make import make_cl_encoder
+from src.models.make import make_wl_decoder
+from src.models.make import make_wl_encoder
 from search import apply_swap
 
 from src.utils.utils import ParallelTextDataset
@@ -44,6 +41,7 @@ if __name__ == '__main__':
     opt.add_argument('--cloze_model', action='store', dest='cloze_model', required=True)
     opt.add_argument('--key', action='store', dest='key', required=True)
     opt.add_argument('--stochastic', action='store', dest='stochastic', default=0, type=int, choices=[0, 1])
+    opt.add_argument('--joined_l2_l1', action='store', dest='joined_l2_l1', default=0, type=int, choices=[0, 1])
     opt.add_argument('--beam_size', action='store', dest='beam_size', default=10, type=int)
     opt.add_argument('--swap_limit', action='store', dest='swap_limit', default=0.3, type=float)
     opt.add_argument('--max_search_depth', action='store', dest='max_search_depth', default=10000, type=int)
@@ -119,6 +117,7 @@ if __name__ == '__main__':
         cloze_model.l2_decoder = g_wl_decoder
         cloze_model.init_param_freeze(CBiLSTM.L2_LEARNING)
     elif isinstance(cloze_model, CBiLSTMFastMap):
+        print('here')
         learned_l1_weights = cloze_model.encoder.weight.data.clone()
         we_size = cloze_model.encoder.weight.size(1)
         encoder = make_wl_encoder(None, None, learned_l1_weights)
@@ -145,6 +144,10 @@ if __name__ == '__main__':
     else:
         raise NotImplementedError("unknown cloze_model" + str(type(cloze_model)))
 
+    if options.joined_l2_l1:
+        assert not isinstance(cloze_model, CBiLSTMFastMap)
+        cloze_model.join_l2_weights()
+
     if options.gpuid > -1:
         cloze_model.init_cuda()
     cloze_model.set_key(l1_key, l2_key)
@@ -156,16 +159,13 @@ if __name__ == '__main__':
         cloze_model.train()
 
     print(cloze_model)
+    macaronic_sents = []
+    sent_init_weights = cloze_model.get_weight()
     hist_flip_l2 = {}
     hist_limit = 1
     penalty = options.penalty  # * ( 1.0 / 8849.0)
-    if cloze_model.is_cuda:
-        sent_init_weights = cloze_model.l2_encoder.weight.clone().detach().cpu()
-    else:
-        sent_init_weights = cloze_model.l2_encoder.weight.clone().detach()
 
     for batch_idx, batch in enumerate(dataset):
-        old_g = cloze_model.l2_encoder.weight.clone()
         lens, l1_data, l2_data, l1_text_data, l2_text_data = batch
         l1_tokens = [SPECIAL_TOKENS.BOS] + l1_text_data[0].strip().split() + [SPECIAL_TOKENS.EOS] # [i2v[i.item()] for i in l1_data[0, :]]
         l2_tokens = [SPECIAL_TOKENS.BOS] + l2_text_data[0].strip().split() + [SPECIAL_TOKENS.EOS] # [i2gv[i.item()] for i in l2_data[0, :]]
@@ -183,10 +183,11 @@ if __name__ == '__main__':
         while not go_next:
             l1_str = ' '.join([str(_idx) + ':' + i for _idx, i in enumerate(macaronic_0.tokens_l1)][1:-1])
             print('\n' + l1_str)
-            swaps_selected = input('swqp (1,' + str(lens[0]-2) + '): ').split(',')
+            swaps_selected = input('swqp (1,' + str(lens[0] - 2) + '): ').split(',')
             swaps_selected = set([int(i) for i in swaps_selected])
             swap_str = ' '.join([(i2v[l1_data[0, i].item()]
-                                 if i not in swaps_selected else (TEXT_EFFECT.UNDERLINE + i2gv[l2_data[0, i].item()] + TEXT_EFFECT.END))
+                                 if i not in swaps_selected else
+                                 (TEXT_EFFECT.UNDERLINE + i2gv[l2_data[0, i].item()] + TEXT_EFFECT.END))
                                  for i in range(1, l1_data.size(1) - 1)])
             new_macaronic = macaronic_0.copy()
             for a in swaps_selected:

@@ -3,6 +3,7 @@ __author__ = 'arenduchintala'
 import math
 import torch
 import torch.nn as nn
+import pdb
 
 from src.models.model import VarLinear
 from src.models.model import VarEmbedding
@@ -57,6 +58,9 @@ class MapEmbedding(nn.Module):
         l2_weights = torch.nn.functional.softmax(self.map_weights, dim=1)
         l2_weights = l2_weights.matmul(self.l1_weights)
         return l2_weights
+
+    def get_map_param(self,):
+        return self.map_weights
 
     def forward(self, x):
         l2_weights = self.get_l2_weights()
@@ -130,11 +134,13 @@ class CEncoderModelMap(nn.Module):
         _l.backward()
 
         if self.mode == CEncoderModelMap.L2_LEARNING:
+            keep_grad = torch.zeros_like(self.l2_encoder.map_weights.grad)
+            keep_grad[l2_seen, :] = 1.0
+            self.l2_encoder.map_weights.grad *= keep_grad
             #for n, p in self.named_parameters():
-            #    print(n, p.requires_grad, p.grad)
-            pass
-        if self.mode == CEncoderModelMap.L1_LEARNING:
-            pass
+            #    print(n, p.requires_grad, p.grad, p.grad.sum().item() if p.grad is not None else 'no sum')
+            #    if p.grad is not None:
+            #        pdb.set_trace()
 
         grad_norm = torch.nn.utils.clip_grad_norm_(filter(lambda p: p.requires_grad, self.parameters()),
                                                    self.max_grad_norm)
