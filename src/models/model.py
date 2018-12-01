@@ -14,6 +14,7 @@ from src.opt.noam import NoamOpt
 from src.rewards import batch_cosine_sim
 from src.rewards import score_embeddings
 from src.rewards import prob_score_embeddings
+from src.rewards import rank_score_embeddings
 
 
 from .transformer_encoder_layer import TransformerEncoderLayer
@@ -394,6 +395,7 @@ class CEncoderModel(nn.Module):
         self.emb_max = self.encoder.weight.max().item()
         self.emb_min = self.encoder.weight.min().item()
         self.use_positional_embeddings = use_positional_embeddings
+        self.mask_unseen_l2 = 0
 
     def join_l2_weights(self,):
         #print(id(self.encoder.weight))
@@ -409,18 +411,22 @@ class CEncoderModel(nn.Module):
         #print(id(self.l2_decoder.weight))
         return True
 
-    def forward(self, batcn):
+    def forward(self, batch, l2_seen, l2_unseen):
         raise NotImplementedError
-
-    def do_backprop(self, batch, l2_seen=None, total_batches=None):
+    
+    def do_backprop(self, batch, l2_seen, total_batches=None):
+        if l2_seen is not None and self.mask_unseen_l2 == 1:
+            l2_unseen = set(range(len(self.l2_dict))) - set(l2_seen.cpu().tolist())
+            l2_unseen = torch.Tensor(list(l2_unseen)).type_as(l2_seen)
+        else:
+            l2_unseen = None
         self.zero_grad()
-        _l, _a = self(batch)
+        _l, _a = self(batch, l2_seen, l2_unseen)
         if isinstance(self.encoder, VariationalEmbeddings):
             kl_loss = (1. / total_batches) * (self.encoder.log_q_w - self.encoder.log_p_w)
             _l += kl_loss
 
         _l.backward()
-
         if self.mode == CEncoderModel.L2_LEARNING:
             keep_grad = torch.zeros_like(self.l2_encoder.weight.grad)
             keep_grad[l2_seen, :] = 1.0
@@ -520,14 +526,15 @@ class CEncoderModel(nn.Module):
         self.l2_encoder.weight.data = weights
         self.l2_decoder.weight.data = weights
 
-    def score_embeddings(self,):
+    def score_embeddings(self, l2_embedding):
         if isinstance(self.encoder, VarEmbedding):
             raise NotImplementedError("only word level scores")
         else:
             l1_embedding = self.encoder.weight.data
-            l2_embedding = self.l2_encoder.weight.data
+            #l2_embedding = self.l2_encoder.weight.data
+            #rank_score_embeddings(l2_embedding, l1_embedding, self.l2_key, self.l1_key)
             s = score_embeddings(l2_embedding, l1_embedding, self.l2_key, self.l1_key)
-            return s.item()
+            return s
 
     def save_model(self, path):
         torch.save(self, path)
@@ -576,8 +583,8 @@ class CTransformerEncoder(CEncoderModel):
 
     def is_cuda(self,):
         return self.layers[0].self_attn.k_linear[0].weight.is_cuda
-
-    def forward(self, batch):
+    
+    def forward(self, batch, l2_seen, l2_unseen):
         lengths, l1_data, l2_data, ind, word_mask = batch
         batch_size, seq_len = l1_data.shape
         l1_idxs = ind.eq(1).long()
@@ -605,7 +612,6 @@ class CTransformerEncoder(CEncoderModel):
             d = torch.arange(1, seq_len)
             diag_mask = diag_mask.unsqueeze(1).repeat(1, seq_len, 1)
             diag_mask[:, d, d] = 1
-            print('with biag block')
 
         elif self.mode == CTransformerEncoder.L2_LEARNING:
             l1_encoded = self.encoder(l1_data)
@@ -646,6 +652,8 @@ class CTransformerEncoder(CEncoderModel):
             l2_final_hidden = final_hidden[l2_idxs == 1, :]
             if l2_final_hidden.shape[0] > 0:
                 l2_out = self.l2_decoder(l2_final_hidden)
+                if l2_unseen is not None:
+                    l2_out[:, l2_unseen] = float('-inf')
                 l2_loss = self.loss(l2_out, l2_data[l2_idxs == 1])
             else:
                 l2_loss = 0.
@@ -676,7 +684,6 @@ class CBiLSTMFast(CEncoderModel):
         self.linear = nn.Linear(2 * self.rnn_size, self.input_size)
         self.init_param_freeze(mode)
         self.loss = torch.nn.CrossEntropyLoss(size_average=size_average, reduce=True, ignore_index=0)
-        self.nllloss = torch.nn.NLLLoss(size_average=size_average, reduce=True, ignore_index=0)
         #self.z = Variable(torch.zeros(1, 1, self.rnn_size), requires_grad=False)
         self.z = torch.zeros(1, 1, self.rnn_size, requires_grad=False)
         # .expand(batch_size, 1, self.rnn_size), requires_grad=False)
@@ -691,55 +698,7 @@ class CBiLSTMFast(CEncoderModel):
     def is_cuda(self,):
         return self.rnn.weight_hh_l0.is_cuda
 
-    def forward(self, batch):
-        lengths, l1_data, l2_data, ind, word_mask = batch
-        l1_idxs = ind.eq(1).long()
-        l2_idxs = ind.eq(2).long()
-        for st in [SPECIAL_TOKENS.PAD, SPECIAL_TOKENS.UNK, SPECIAL_TOKENS.EOS, SPECIAL_TOKENS.BOS]:
-            if st in self.l1_dict:
-                l1_idxs[l1_data.eq(self.l1_dict[st])] = 0
-                l2_idxs[l1_data.eq(self.l1_dict[st])] = 0
-        #if seen is not None:
-        #    seen, seen_offset, seen_set = seen
-        # if self.is_cuda():
-        #     data = data.cuda()
-        batch_size = l1_data.size(0)
-        # max_seq_len = data.size(1)
-
-        # l1_data = (batch_size x seq_len)
-        # l2_data = (batch_size x seq_len)
-        if self.mode == CEncoderModel.L2_LEARNING:
-            l1_encoded = self.encoder(l1_data)
-            l2_encoded = self.l2_encoder(l2_data)
-            g_inp_ind = l2_idxs.unsqueeze(2).expand(l2_idxs.size(0), l2_idxs.size(1), l2_encoded.size(2)).float()
-            v_inp_ind = l1_idxs.unsqueeze(2).expand(l1_idxs.size(0), l1_idxs.size(1), l1_encoded.size(2)).float()
-            tmp_encoded = v_inp_ind * l1_encoded + g_inp_ind * l2_encoded
-            encoded = l1_encoded * l1_idxs.unsqueeze(2).expand_as(l1_encoded).float() + \
-                l2_encoded * l2_idxs.unsqueeze(2).expand_as(l2_encoded).float()
-            assert (encoded - tmp_encoded).sum().item() == 0
-            encoded = self.dropout(encoded)
-        elif self.mode == CEncoderModel.L12_LEARNING:
-            raise NotImplementedError("no longer supported")
-            l1_encoded = self.encoder(l1_data)
-            l2_encoded = self.l2_encoder(l2_data)
-            g_inp_ind = l2_idxs.unsqueeze(2).expand(l2_idxs.size(0), l2_idxs.size(1), l2_encoded.size(2)).float()
-            v_inp_ind = l1_idxs.unsqueeze(2).expand(l1_idxs.size(0), l1_idxs.size(1), l1_encoded.size(2)).float()
-            encoded = v_inp_ind * l1_encoded + g_inp_ind * l2_encoded
-            #encoded = l1_encoded * l1_idxs.unsqueeze(2).expand_as(l1_encoded).float() + \
-            #    l2_encoded * l2_idxs.unsqueeze(2).expand_as(l2_encoded).float()
-            #assert (encoded - tmp_encoded).sum().item() == 0
-            encoded = self.dropout(encoded)
-        else:
-            #pos_data = torch.arange(lengths[0]).expand_as(l1_data).type_as(l1_data)
-            #pos_data[pos_data > self.max_positional_embeddings - 1] = self.max_positional_embeddings - 1
-            l1_encoded = self.encoder(l1_data)
-            rand = torch.zeros_like(l1_encoded[word_mask == 1, :]).uniform_(self.emb_min, self.emb_max)
-            rand.requires_grad = False
-            l1_encoded[word_mask == 1, :] = rand
-            #l1_pos_encoded = self.positional_embeddings(pos_data)
-            #l1_encoded += l1_pos_encoded
-            encoded = self.dropout(l1_encoded)
-
+    def get_hiddens(self, encoded, lengths, batch_size):
         packed_encoded = pack(encoded, lengths, batch_first=True)
         # encoded = (batch_size x seq_len x embedding_size)
         packed_hidden, (h_t, c_t) = self.rnn(packed_encoded)
@@ -752,6 +711,93 @@ class CBiLSTMFast(CEncoderModel):
         final_hidden = torch.cat((fwd_hidden, bwd_hidden), dim=2)
         final_hidden = self.dropout(final_hidden)
         final_hidden = self.linear(final_hidden)
+        return final_hidden
+
+    def get_mixed_input_encoding(self, l1_data, l2_data, l1_idxs, l2_idxs, l2_encoder):
+        l1_encoded = self.encoder(l1_data)
+        l2_encoded = l2_encoder(l2_data)
+        g_inp_ind = l2_idxs.unsqueeze(2).expand(l2_idxs.size(0), l2_idxs.size(1), l2_encoded.size(2)).float()
+        v_inp_ind = l1_idxs.unsqueeze(2).expand(l1_idxs.size(0), l1_idxs.size(1), l1_encoded.size(2)).float()
+        tmp_encoded = v_inp_ind * l1_encoded + g_inp_ind * l2_encoded
+        encoded = l1_encoded * l1_idxs.unsqueeze(2).expand_as(l1_encoded).float() + \
+            l2_encoded * l2_idxs.unsqueeze(2).expand_as(l2_encoded).float()
+        assert (encoded - tmp_encoded).sum().item() == 0
+        encoded = self.dropout(encoded)
+        return encoded
+
+    def get_l1_output_predictions(self, final_hidden, l1_data, l1_idxs, l2_idxs):
+        final_hidden = final_hidden.squeeze(0) # we assume batch size == 1
+        l1_out = self.decoder(final_hidden)
+        l1_pred = l1_out.argmax(1)
+        l1_probs = torch.nn.functional.softmax(l1_out, dim=1)
+        return l1_probs, l1_pred
+
+    def bp_iter(self, lengths, batch_size, l1_data, l2_data, l1_idxs, l2_idxs, l2_weights):
+        self.update_g_weights(l2_weights)
+        encoded = self.get_mixed_input_encoding(l1_data, l2_data, l1_idxs, l2_idxs, self.l2_encoder)
+        final_hiddens = self.get_hiddens(encoded, lengths, batch_size)
+        l1_probs, l1_pred = self.get_l1_output_predictions(final_hiddens, l1_data, l1_idxs, l2_idxs)
+        pdb.set_trace()
+        print('l1_preds at l2 words', l1_pred[l2_idxs[0] == 1])
+        print('l2_words', l2_data[l2_idxs == 1])
+        pdb.set_trace()
+        l1_pred_embeddings = self.encoder.weights.data[l1_pred[l2_idxs == 1]]
+        l2_weights[l2_data[l2_idxs == 1]] = l1_pred_embeddings
+        pdb.set_trace()
+        #TODO: do something with l1_probs and l1_pred and get new l2_weights
+
+    def do_bp_forward(self, batch, l2_weights):
+        lengths, l1_data, l2_data, ind, word_mask = batch
+        l1_idxs = ind.eq(1).long()
+        l2_idxs = ind.eq(2).long()
+        for st in [SPECIAL_TOKENS.PAD, SPECIAL_TOKENS.UNK, SPECIAL_TOKENS.EOS, SPECIAL_TOKENS.BOS]:
+            if st in self.l1_dict:
+                l1_idxs[l1_data.eq(self.l1_dict[st])] = 0
+                l2_idxs[l1_data.eq(self.l1_dict[st])] = 0
+        batch_size = l1_data.size(0)
+        for _ in range(10):
+            print('bp iter', _)
+            l2_weights = self.bp_iter(lengths, batch_size, l1_data, l2_data, l1_idxs, l2_idxs, l2_weights)
+        return l2_weights
+
+    def forward(self, batch, l2_seen, l2_unseen):
+        lengths, l1_data, l2_data, ind, word_mask = batch
+        l1_idxs = ind.eq(1).long()
+        l2_idxs = ind.eq(2).long()
+        for st in [SPECIAL_TOKENS.PAD, SPECIAL_TOKENS.UNK, SPECIAL_TOKENS.EOS, SPECIAL_TOKENS.BOS]:
+            if st in self.l1_dict:
+                l1_idxs[l1_data.eq(self.l1_dict[st])] = 0
+                l2_idxs[l1_data.eq(self.l1_dict[st])] = 0
+        batch_size = l1_data.size(0)
+        # l1_data = (batch_size x seq_len)
+        # l2_data = (batch_size x seq_len)
+        if self.mode == CEncoderModel.L2_LEARNING:
+            encoded = self.get_mixed_input_encoding(l1_data, l2_data, l1_idxs, l2_idxs, self.l2_encoder)
+        elif self.mode == CEncoderModel.L12_LEARNING:
+            raise NotImplementedError("no longer supported")
+            #l1_encoded = self.encoder(l1_data)
+            #l2_encoded = self.l2_encoder(l2_data)
+            #g_inp_ind = l2_idxs.unsqueeze(2).expand(l2_idxs.size(0), l2_idxs.size(1), l2_encoded.size(2)).float()
+            #v_inp_ind = l1_idxs.unsqueeze(2).expand(l1_idxs.size(0), l1_idxs.size(1), l1_encoded.size(2)).float()
+            #encoded = v_inp_ind * l1_encoded + g_inp_ind * l2_encoded
+            #encoded = l1_encoded * l1_idxs.unsqueeze(2).expand_as(l1_encoded).float() + \
+            #    l2_encoded * l2_idxs.unsqueeze(2).expand_as(l2_encoded).float()
+            #assert (encoded - tmp_encoded).sum().item() == 0
+            #encoded = self.dropout(encoded)
+        elif self.mode == CEncoderModel.L1_LEARNING:
+            #pos_data = torch.arange(lengths[0]).expand_as(l1_data).type_as(l1_data)
+            #pos_data[pos_data > self.max_positional_embeddings - 1] = self.max_positional_embeddings - 1
+            l1_encoded = self.encoder(l1_data)
+            rand = torch.zeros_like(l1_encoded[word_mask == 1, :]).uniform_(self.emb_min, self.emb_max)
+            rand.requires_grad = False
+            l1_encoded[word_mask == 1, :] = rand
+            #l1_pos_encoded = self.positional_embeddings(pos_data)
+            #l1_encoded += l1_pos_encoded
+            encoded = self.dropout(l1_encoded)
+        else:
+            raise NotImplementedError("unknown mode")
+
+        final_hidden = self.get_hiddens(encoded, lengths, batch_size)
 
         if self.mode == CEncoderModel.L1_LEARNING:
             l1_final_hidden = final_hidden[l1_idxs == 1, :]
@@ -764,12 +810,16 @@ class CBiLSTMFast(CEncoderModel):
             l1_final_hidden = final_hidden[l1_idxs == 1, :]
             if l1_final_hidden.shape[0] > 0:
                 l1_out = self.decoder(l1_final_hidden)
+                #pdb.set_trace()
+                #l1_probs = torch.nn.functional.softmax(l1_out)
                 l1_loss = self.loss(l1_out, l1_data[l1_idxs == 1])
             else:
                 l1_loss = 0.
             l2_final_hidden = final_hidden[l2_idxs == 1, :]
             if l2_final_hidden.shape[0] > 0:
                 l2_out = self.l2_decoder(l2_final_hidden)
+                if l2_unseen is not None:
+                    l2_out[:, l2_unseen] = float('-inf')
                 l2_loss = self.loss(l2_out, l2_data[l2_idxs == 1])
             else:
                 l2_loss = 0.
@@ -824,7 +874,7 @@ class CBiLSTM(CEncoderModel):
     def is_cuda(self,):
         return self.fwd_rnn.weight_hh_l0.is_cuda
 
-    def forward(self, batch):
+    def forward(self, batch, l2_seen, l2_unseen):
         lengths, l1_data, l2_data, ind, word_mask = batch
         rev_idx_col = torch.zeros(l1_data.size(0), l1_data.size(1)).long()
         for _idx, l in enumerate(lengths):
@@ -933,6 +983,8 @@ class CBiLSTM(CEncoderModel):
             l2_final_hidden = final_hidden[l2_idxs == 1, :]
             if l2_final_hidden.shape[0] > 0:
                 l2_out = self.l2_decoder(l2_final_hidden)
+                if l2_unseen is not None:
+                    l2_out[:, l2_unseen] = float('-inf')
                 l2_loss = self.loss(l2_out, l2_data[l2_idxs == 1])
             else:
                 l2_loss = 0.

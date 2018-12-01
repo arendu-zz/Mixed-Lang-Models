@@ -13,7 +13,7 @@ class SearchTree(object):
         self.rollout_func = rollout_func
         self.rollout_params = rollout_params
         self.state_update_func = state_update_func
-        self.iters = 5
+        self.iters = 20
         self.nodes_seen = {}
         self.gamma = 1.0
         self.backup_type = backup_type
@@ -45,8 +45,8 @@ class SearchTree(object):
                 #    same_rank = 0
                 #prev_rank = rank
                 #print('same_rank', same_rank, rank)
-                if max(_vis) - min(_vis) >= 3:
-                    break
+                #if max(_vis) - min(_vis) >= 3:
+                #    break
             #    best_action, best_node = self.select_child(root_node, self.C)
             #    best_action_count = best_action_count + 1 if best_action == prev_best_action else 0
             #    prev_best_action = best_action
@@ -58,9 +58,10 @@ class SearchTree(object):
             if not node.state.terminal:
                 node, search_sequence = self.expansion(node, search_sequence)
                 print('===expansion node===\n', node)
-                rollout_state = self.rollout(node)
-                print('===rollout state===\n', rollout_state)
-                reward = rollout_state.score  # - root_node.state.score
+                if not node.state.terminal:
+                    rollout_state = self.rollout(node)
+                    print('===rollout state===\n', rollout_state)
+                    reward = rollout_state.score  # - root_node.state.score
             else:
                 reward = node.state.score # - root_node.state.score
             self.backup(reward, 0, search_sequence)
