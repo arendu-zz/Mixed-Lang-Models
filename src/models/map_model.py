@@ -104,6 +104,7 @@ class CEncoderModelMap(nn.Module):
         self.use_positional_embeddings = use_positional_embeddings
         self.l2_encoder = None #MapEmbedding(self.encoder.weight, map_weights)
         self.l2_decoder = None #MapLinear(self.encoder.weight, map_weights)
+        self.mask_unseen_l2 = 0
 
     def init_l2_weights(self, map_weights):
         self.map_param = torch.nn.Parameter(map_weights)

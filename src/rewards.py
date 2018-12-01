@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 __author__ = 'arenduchintala'
+import pdb
 import torch
 import torch.nn.functional as F
 
@@ -36,7 +37,14 @@ def score_embeddings(l2_embedding, l1_embedding, l2_key, l1_key):
     l1_sub = l1_embedding[l1_key]
     cs = batch_cosine_sim(l2_sub, l1_sub)  # _embedding, l1_embedding)
     cs = cs.diag()
-    cs = torch.nn.functional.relu(cs - 0.3) ** 2
+    cs = torch.nn.functional.relu(cs - 0.0) ** 2
     #scores = sigmoid(cs, 10)
     #print(cs.diag().view(-1).cpu().numpy(), score)
-    return cs.sum()
+    #cs_list = ','.join(['%.3f'%i for i in cs.tolist()])
+    #print(cs_list)
+    return cs.sum().item()
+
+def rank_score_embeddings(l2_embedding, l1_embedding, l2_key, l1_key):
+    cs = batch_cosine_sim(l2_embedding, l1_embedding)
+    pdb.set_trace()
+    pass

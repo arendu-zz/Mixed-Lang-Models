@@ -6,6 +6,7 @@ import pickle
 import sys
 import torch
 import random
+import pdb
 
 from src.models.model import CBiLSTM
 from src.models.model import CBiLSTMFast
@@ -16,6 +17,7 @@ from src.models.model import WordRepresenter
 from src.states.states import MacaronicState
 from src.states.states import PriorityQ
 from src.states.states import MacaronicSentence
+from src.states.states import NEXT_SENT
 from src.models.model import make_cl_decoder
 from src.models.model import make_cl_encoder
 from src.models.model import make_wl_decoder
@@ -25,9 +27,6 @@ import time
 
 from src.utils.utils import ParallelTextDataset
 from src.utils.utils import SPECIAL_TOKENS
-
-global NEXT_SENT
-NEXT_SENT = (-1, None)
 
 
 def prep_swap(macaronic_config):
@@ -52,18 +51,52 @@ def prep_swap(macaronic_config):
     return macaronic_d1, indicator, flip_l2, flip_l2_offset, flip_l2_set
 
 
-def apply_swap(macaronic_config, model, weights, max_steps=1, improvement_threshold=0.01):
+def apply_swap_bp(macaronic_config, model, weights, max_steps=1, improvement_threshold=0.01, previous_seen_l2=None):
+    assert isinstance(macaronic_config, MacaronicSentence)
     l1_data = macaronic_config.int_l1.clone()
     l2_data = macaronic_config.int_l2.clone()
     swap_ind = torch.LongTensor(sorted(list(macaronic_config.swapped)))
-    flip_l2_set = torch.LongTensor(list(macaronic_config.l2_swapped_types))
+    if previous_seen_l2 is not None:
+        seen_l2 = macaronic_config.l2_swapped_types.union(previous_seen_l2)
+    else:
+        seen_l2 = macaronic_config.l2_swapped_types
+    flip_l2_set = torch.LongTensor(list(seen_l2))
     indicator = torch.LongTensor([1] * l1_data.size(1)).unsqueeze(0)
     indicator[:, swap_ind] = 2
+    mask = make_random_mask(l1_data, [l1_data.size(1)], 0.0, 0)
     if model.is_cuda():
         l1_data = l1_data.cuda()
         l2_data = l2_data.cuda()
         indicator = indicator.cuda()
-        mask = make_random_mask(l1_data, [l1_data.size(1)], 0.0, 0)
+        mask = mask.cuda() #make_random_mask(l1_data, [l1_data.size(1)], 0.0, 0)
+        flip_l2_set = flip_l2_set.cuda()
+    var_batch = [l1_data.size(1)], l1_data, l2_data, indicator, mask
+    #model.update_g_weights(weights)
+    #model.init_param_freeze(CBiLSTM.L2_LEARNING)
+    #model.init_optimizer(type='SGD')
+    new_weights = model.do_bp_forward(var_batch, weights)
+    step_score_vocabtype = model.score_embeddings(new_weights)
+    return step_score_vocabtype, new_weights
+
+
+def apply_swap(macaronic_config, model, weights, max_steps=1, improvement_threshold=0.01, previous_seen_l2=None):
+    assert isinstance(macaronic_config, MacaronicSentence)
+    l1_data = macaronic_config.int_l1.clone()
+    l2_data = macaronic_config.int_l2.clone()
+    swap_ind = torch.LongTensor(sorted(list(macaronic_config.swapped)))
+    if previous_seen_l2 is not None:
+        seen_l2 = macaronic_config.l2_swapped_types.union(previous_seen_l2)
+    else:
+        seen_l2 = macaronic_config.l2_swapped_types
+    flip_l2_set = torch.LongTensor(list(seen_l2))
+    indicator = torch.LongTensor([1] * l1_data.size(1)).unsqueeze(0)
+    indicator[:, swap_ind] = 2
+    mask = make_random_mask(l1_data, [l1_data.size(1)], 0.0, 0)
+    if model.is_cuda():
+        l1_data = l1_data.cuda()
+        l2_data = l2_data.cuda()
+        indicator = indicator.cuda()
+        mask = mask.cuda() #make_random_mask(l1_data, [l1_data.size(1)], 0.0, 0)
         flip_l2_set = flip_l2_set.cuda()
     var_batch = [l1_data.size(1)], l1_data, l2_data, indicator, mask
     model.update_g_weights(weights)
@@ -75,7 +108,7 @@ def apply_swap(macaronic_config, model, weights, max_steps=1, improvement_thresh
     #improvement = 1.
     while num_steps < max_steps:  # and improvement > improvement_threshold:
         loss, acc, grad_norm = model.do_backprop(var_batch, l2_seen=flip_l2_set)  # (flip_l2, flip_l2_offset, flip_l2_set))
-        step_score_vocabtype = model.score_embeddings()
+        step_score_vocabtype = model.score_embeddings(model.l2_encoder.weight.data.clone())
         num_steps += 1
         #improvement = prev_loss - loss
         #prev_loss = loss
@@ -86,7 +119,7 @@ def apply_swap(macaronic_config, model, weights, max_steps=1, improvement_thresh
 
 
 def make_start_state(i2v, i2gv, init_weights, model, dl, **kwargs):
-    score_0 = model.score_embeddings()
+    score_0 = model.score_embeddings(model.l2_encoder.weight.data.clone())
     macaronic_sentences = []
     for sent_idx, sent in enumerate(dl):
         lens, l1_data, l2_data, l1_text_data, l2_text_data = sent
@@ -109,6 +142,38 @@ def make_start_state(i2v, i2gv, init_weights, model, dl, **kwargs):
     return state
 
 
+def beam_search_per_sentence(init_state, **kwargs):
+    beam_size = kwargs['beam_size']
+    best_state = init_state
+    q = PriorityQ(beam_size)
+    q.append(init_state)
+    while not best_state.terminal:
+        while q.length() > 0:
+            curr_state = q.pop(kwargs['stochastic'] == 1)
+            if 'verbose' in kwargs and kwargs['verbose']:
+                print('curr_state\n', str(curr_state))
+                pass
+            if curr_state.score >= best_state.score:
+                best_state = curr_state
+            actions, action_weights = curr_state.possible_actions()
+            for action in actions:  # sorted(zip(action_weights, actions), reverse=True):
+                if action == NEXT_SENT:
+                    pass
+                else:
+                    new_state = curr_state.next_state(action, apply_swap, **kwargs)
+                    if new_state.displayed_sentence_idx - init_state.displayed_sentence_idx < kwargs['max_search_depth']:
+                        q.append(new_state)
+        if best_state.terminal:
+            pass
+        else:
+            assert q.length() == 0, "q should be empty at this point!"
+            actions, action_weights = best_state.possible_actions()
+            assert NEXT_SENT in actions
+            init_next_sentence_state = best_state.next_state(NEXT_SENT, apply_swap, **kwargs)
+            q.append(init_next_sentence_state)
+    return best_state
+
+
 def beam_search(init_state, **kwargs):
     beam_size = kwargs['beam_size']
     best_state = init_state
@@ -118,9 +183,9 @@ def beam_search(init_state, **kwargs):
     while q.length() > 0:
         curr_state = q.pop(kwargs['stochastic'] == 1)
         if 'verbose' in kwargs and kwargs['verbose']:
-            #print('curr_state\n', str(curr_state))
+            print('curr_state\n', str(curr_state))
             pass
-        if curr_state.score >= best_state.score:
+        if curr_state.score >= best_state.score and curr_state.terminal:
             best_state = curr_state
         actions, action_weights = curr_state.possible_actions()
         for action in actions:  # sorted(zip(action_weights, actions), reverse=True):
@@ -157,6 +222,7 @@ if __name__ == '__main__':
     opt.add_argument('--key', action='store', dest='key', required=True)
     opt.add_argument('--stochastic', action='store', dest='stochastic', default=0, type=int, choices=[0, 1])
     opt.add_argument('--joined_l2_l1', action='store', dest='joined_l2_l1', default=0, type=int, choices=[0, 1])
+    opt.add_argument('--mask_unseen_l2', action='store', dest='mask_unseen_l2', default=1, type=int, choices=[0, 1])
     opt.add_argument('--beam_size', action='store', dest='beam_size', default=10, type=int)
     opt.add_argument('--swap_limit', action='store', dest='swap_limit', default=0.3, type=float)
     opt.add_argument('--max_search_depth', action='store', dest='max_search_depth', default=10000, type=int)
@@ -233,7 +299,6 @@ if __name__ == '__main__':
         cloze_model.l2_decoder = g_wl_decoder
         cloze_model.init_param_freeze(CBiLSTM.L2_LEARNING)
     elif isinstance(cloze_model, CBiLSTMFastMap):
-        print('here')
         learned_l1_weights = cloze_model.encoder.weight.data.clone()
         we_size = cloze_model.encoder.weight.size(1)
         encoder = make_wl_encoder(None, None, learned_l1_weights)
@@ -263,6 +328,7 @@ if __name__ == '__main__':
     if options.joined_l2_l1:
         assert not isinstance(cloze_model, CBiLSTMFastMap)
         cloze_model.join_l2_weights()
+    cloze_model.mask_unseen_l2 = options.mask_unseen_l2
 
     if options.gpuid > -1:
         cloze_model.init_cuda()

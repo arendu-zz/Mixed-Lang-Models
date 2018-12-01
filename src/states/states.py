@@ -6,7 +6,6 @@ import pdb
 
 from src.utils.utils import TEXT_EFFECT
 
-global NEXT_SENT
 NEXT_SENT = (-1, None)
 
 
@@ -85,7 +84,7 @@ class MacaronicState(object):
         for i in range(self.displayed_sentence_idx + 1):
             c += len(self.macaronic_sentences[i].l2_swapped_tokens)
             u.update(self.macaronic_sentences[i].l2_swapped_types)
-        return c, len(u)
+        return c, u
 
     def possible_actions(self,):
         s = self.current_sentence()
@@ -139,7 +138,8 @@ class MacaronicState(object):
                                                        kwargs['max_steps'],
                                                        kwargs['improvement_threshold'])
             c.weights = new_weights
-            swap_token_count, swap_type_count = c.swap_counts()
+            swap_token_count, swap_types = c.swap_counts()
+            swap_type_count = len(swap_types)
             c.score = new_score - (kwargs['penalty'] * swap_type_count)
             if c.displayed_sentence_idx + 1 < len(c.macaronic_sentences):
                 c.displayed_sentence_idx = self.displayed_sentence_idx + 1
@@ -149,7 +149,8 @@ class MacaronicState(object):
         else:
             current_displayed_config.update_config(action)
             c.weights = c.weights  # should not give new_weights here!
-            swap_token_count, swap_type_count = c.swap_counts()
+            swap_token_count, swap_types = c.swap_counts()
+            swap_type_count = len(swap_types)
             return c
 
     def next_state(self, action, model_config_func, **kwargs):
@@ -158,17 +159,19 @@ class MacaronicState(object):
         current_displayed_config = c.current_sentence()
         if action == NEXT_SENT:
             #TODO: why do we need to use model_config_func???
-            _, new_weights = model_config_func(current_displayed_config,
-                                               c.model,
-                                               c.weights,
-                                               kwargs['max_steps'],
-                                               kwargs['improvement_threshold'])
-            #assert new_score == c.score
+            swap_token_count, swap_types = c.swap_counts()
+            swap_type_count = len(swap_types)
+            new_score, new_weights = model_config_func(current_displayed_config,
+                                                       c.model,
+                                                       c.weights,
+                                                       kwargs['max_steps'],
+                                                       kwargs['improvement_threshold'],
+                                                       swap_types)
             c.weights = new_weights
-            #c.swap_token_counts = self.swap_token_counts
-            swap_token_count, swap_type_count = c.swap_counts()
-            #assert swap_token_count == c.swap_token_counts
-            #c.score = new_score - (kwargs['penalty'] * swap_type_count)
+            c.swap_token_counts = self.swap_token_counts
+            assert swap_token_count == c.swap_token_counts
+            assert c.score == new_score - (kwargs['penalty'] * swap_type_count)
+            c.score = new_score - (kwargs['penalty'] * swap_type_count)
             if c.displayed_sentence_idx + 1 < len(c.macaronic_sentences):
                 c.displayed_sentence_idx = self.displayed_sentence_idx + 1
                 c.start_score = c.score
@@ -179,16 +182,18 @@ class MacaronicState(object):
         else:
             #print(action)
             current_displayed_config.update_config(action)
+            swap_token_count, swap_types = c.swap_counts()
+            swap_type_count = len(swap_types)
             new_score, _ = model_config_func(current_displayed_config,
                                              c.model,
                                              c.weights,
                                              kwargs['max_steps'],
-                                             kwargs['improvement_threshold'])
-            c.weights = c.weights  # should not give new_weights here!
+                                             kwargs['improvement_threshold'],
+                                             swap_types)
+            #c.weights = c.weights  # should not give new_weights here!
             c.swap_token_counts = self.swap_token_counts + (1 if action[1] else 0)
-            swap_token_count, swap_type_count = c.swap_counts()
-            #print('here!',  swap_token_count, c.swap_token_counts, swap_token_count == c.swap_token_counts)
             assert swap_token_count == c.swap_token_counts
+            #print('here!',  swap_token_count, c.swap_token_counts, swap_token_count == c.swap_token_counts)
             c.score = new_score - (kwargs['penalty'] * swap_type_count)
             return c
 

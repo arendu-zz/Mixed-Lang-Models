@@ -11,11 +11,12 @@ from src.models.model import CTransformerEncoder
 from src.models.model import VarEmbedding
 from src.models.model import WordRepresenter
 from src.states.states import MacaronicSentence
-from src.models.make import make_cl_decoder
-from src.models.make import make_cl_encoder
-from src.models.make import make_wl_decoder
-from src.models.make import make_wl_encoder
+from src.models.model import make_cl_decoder
+from src.models.model import make_cl_encoder
+from src.models.model import make_wl_decoder
+from src.models.model import make_wl_encoder
 from search import apply_swap
+from search import apply_swap_bp
 
 from src.utils.utils import ParallelTextDataset
 from src.utils.utils import SPECIAL_TOKENS
@@ -41,6 +42,7 @@ if __name__ == '__main__':
     opt.add_argument('--cloze_model', action='store', dest='cloze_model', required=True)
     opt.add_argument('--key', action='store', dest='key', required=True)
     opt.add_argument('--stochastic', action='store', dest='stochastic', default=0, type=int, choices=[0, 1])
+    opt.add_argument('--mask_unseen_l2', action='store', dest='mask_unseen_l2', default=1, type=int, choices=[0, 1])
     opt.add_argument('--joined_l2_l1', action='store', dest='joined_l2_l1', default=0, type=int, choices=[0, 1])
     opt.add_argument('--beam_size', action='store', dest='beam_size', default=10, type=int)
     opt.add_argument('--swap_limit', action='store', dest='swap_limit', default=0.3, type=float)
@@ -147,6 +149,7 @@ if __name__ == '__main__':
     if options.joined_l2_l1:
         assert not isinstance(cloze_model, CBiLSTMFastMap)
         cloze_model.join_l2_weights()
+    cloze_model.mask_unseen_l2 = options.mask_unseen_l2
 
     if options.gpuid > -1:
         cloze_model.init_cuda()
@@ -164,6 +167,7 @@ if __name__ == '__main__':
     hist_flip_l2 = {}
     hist_limit = 1
     penalty = options.penalty  # * ( 1.0 / 8849.0)
+    total_swap_types = set([])
 
     for batch_idx, batch in enumerate(dataset):
         lens, l1_data, l2_data, l1_text_data, l2_text_data = batch
@@ -201,11 +205,13 @@ if __name__ == '__main__':
             swap_score, new_weights = apply_swap(new_macaronic,
                                                  cloze_model,
                                                  sent_init_weights)
-            print('swap score', swap_score)
+            print('swap score:', swap_score)
+            print('swap score + penalty:', swap_score - options.penalty * len(total_swap_types.union(new_macaronic.l2_swapped_types)))
             go_next = input('next line or retry (n/r):')
             go_next = go_next == 'n'
             if go_next:
                 print('going to next...')
+                total_swap_types = total_swap_types.union(new_macaronic.l2_swapped_types)
                 if cloze_model.is_cuda:
                     sent_init_weights = cloze_model.l2_encoder.weight.clone().detach().cpu()
                 else:
