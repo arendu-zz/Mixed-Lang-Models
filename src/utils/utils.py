@@ -49,6 +49,8 @@ class LazyTextBatcher(object):
         with open(self.file_name, 'r', encoding='utf-8') as f:
             max_batch = []
             for line in f:
+                if line[0] == '#':
+                    continue
                 lines = line.strip().split('|||')
                 l1_line = lines[0]
                 if len(lines) == 2:

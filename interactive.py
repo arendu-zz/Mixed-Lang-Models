@@ -17,6 +17,7 @@ from src.models.model import make_wl_decoder
 from src.models.model import make_wl_encoder
 from search import apply_swap
 from search import apply_swap_bp
+from search import nearest_neighbors
 
 from src.utils.utils import ParallelTextDataset
 from src.utils.utils import SPECIAL_TOKENS
@@ -54,6 +55,8 @@ if __name__ == '__main__':
     opt.add_argument('--improvement', action='store', dest='improvement_threshold', default=0.01, type=float)
     opt.add_argument('--penalty', action='store', dest='penalty', default=0.0, type=float)
     opt.add_argument('--verbose', action='store_true', dest='verbose', default=False)
+    opt.add_argument('--reward', action='store', dest='reward_type',type=str, choices=['ranking', 'cs'])
+    opt.add_argument('--debug_print', action='store_true', dest='debug_print', default=False)
     opt.add_argument('--seed', action='store', dest='seed', default=1234, type=int)
     options = opt.parse_args()
     print(options)
@@ -156,6 +159,8 @@ if __name__ == '__main__':
     cloze_model.set_key(l1_key, l2_key)
     cloze_model.init_key()
     cloze_model.l2_dict = gv2i
+    cloze_model.l1_dict_idx = {v: k for k, v in cloze_model.l1_dict.items()}  # TODO: this can be removed once new lms are built...
+    cloze_model.l2_dict_idx = {v: k for k, v in cloze_model.l2_dict.items()}
     if isinstance(cloze_model, CBiLSTM) or \
        isinstance(cloze_model, CBiLSTMFast) or \
        isinstance(cloze_model, CBiLSTMFastMap):
@@ -175,7 +180,8 @@ if __name__ == '__main__':
         l2_tokens = [SPECIAL_TOKENS.BOS] + l2_text_data[0].strip().split() + [SPECIAL_TOKENS.EOS] # [i2gv[i.item()] for i in l2_data[0, :]]
         swapped = set([])
         not_swapped = set([])
-        swappable = set(range(1, l1_data[0, :].size(0) - 1))
+        #swappable = set(range(1, l1_data[0, :].size(0) - 1))
+        swappable = set([idx for idx, i in enumerate(l2_data[0, :]) if i != gv2i[SPECIAL_TOKENS.UNK]][1:-1])
         macaronic_0 = MacaronicSentence(l1_tokens,
                                         l2_tokens,
                                         l1_data.clone(),
@@ -185,7 +191,7 @@ if __name__ == '__main__':
                                         1.0)
         go_next = False
         while not go_next:
-            l1_str = ' '.join([str(_idx) + ':' + i for _idx, i in enumerate(macaronic_0.tokens_l1)][1:-1])
+            l1_str = ' '.join([str(_idx) + ':' + i for _idx, i in enumerate(macaronic_0.tokens_l1) if _idx in macaronic_0.swappable])
             print('\n' + l1_str)
             swaps_selected = input('swqp (1,' + str(lens[0] - 2) + '): ').split(',')
             swaps_selected = set([int(i) for i in swaps_selected])
@@ -198,15 +204,27 @@ if __name__ == '__main__':
                 new_macaronic.update_config((a, True))
             if options.verbose:
                 print(new_macaronic)
-            init_score, _ = apply_swap(macaronic_0,
-                                       cloze_model,
-                                       sent_init_weights)
-            print('init score', init_score)
-            swap_score, new_weights = apply_swap(new_macaronic,
-                                                 cloze_model,
-                                                 sent_init_weights)
-            print('swap score:', swap_score)
-            print('swap score + penalty:', swap_score - options.penalty * len(total_swap_types.union(new_macaronic.l2_swapped_types)))
+            swap_result = apply_swap(macaronic_0,
+                                     cloze_model,
+                                     sent_init_weights,
+                                     options.max_steps,
+                                     options.improvement_threshold,
+                                     options.reward_type,
+                                     macaronic_0.l2_swapped_types)
+            print('init score', swap_result['score'])
+            swap_result = apply_swap(new_macaronic,
+                                     cloze_model,
+                                     sent_init_weights,
+                                     options.max_steps,
+                                     options.improvement_threshold,
+                                     options.reward_type,
+                                     new_macaronic.l2_swapped_types)
+            print('swap score:', swap_result['score'])
+            print('swap score + penalty:', swap_result['score'] - options.penalty * len(total_swap_types.union(new_macaronic.l2_swapped_types)))
+            l1_weights = cloze_model.encoder.weight.data.detach().clone()
+            l2_weights = swap_result['weights']
+            print(nearest_neighbors(l1_weights, l2_weights, new_macaronic.l2_swapped_types,
+                                    cloze_model.l1_dict_idx, cloze_model.l2_dict_idx))
             go_next = input('next line or retry (n/r):')
             go_next = go_next == 'n'
             if go_next:

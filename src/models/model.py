@@ -11,13 +11,12 @@ from torch.nn.utils.rnn import pad_packed_sequence as unpack
 from src.utils.utils import SPECIAL_TOKENS
 from src.opt.noam import NoamOpt
 
-from src.rewards import batch_cosine_sim
 from src.rewards import score_embeddings
-from src.rewards import prob_score_embeddings
 from src.rewards import rank_score_embeddings
 
 
 from .transformer_encoder_layer import TransformerEncoderLayer
+
 
 def get_unsort_idx(sort_idx):
     unsort_idx = torch.zeros_like(sort_idx).long().scatter_(0, sort_idx, torch.arange(sort_idx.size(0)).long())
@@ -236,33 +235,6 @@ class VarLinear(nn.Module):
         return self.matmul(data)
 
 
-class MapLinear(nn.Module):
-    def __init__(self, l1_weights, map_weights):
-        super(MapLinear, self).__init__()
-        self.l1_weights = l1_weights
-        self.l1_weights.requires_grad = False
-        #shape = l1_vocab x emb_size
-        #l1_voc, l2_voc = self.map.shape
-        self.map_weights = map_weights
-        self.map_weights.requires_grad = True
-        self.register_buffer('l1_weight', self.l1_weights)
-        self.register_buffer('map_weight', self.map_weights)
-
-    def get_l2_weights(self,):
-        l2_weights = torch.nn.functional.softmax(self.map_weights, dim=1)
-        l2_weights = l2_weights.matmul(self.l1_weights)
-        return l2_weights
-
-    def forward(self, x):
-        l2_weights = self.get_l2_weights()
-        if x.dim() > 1:
-            assert x.size(-1) == l2_weights.size(-1)
-            return torch.matmul(x, l2_weights.transpose(0, 1))
-        else:
-            raise BaseException("x should be at least 2 dimensional")
-        return None
-
-
 class VarEmbedding(nn.Module):
     def __init__(self, word_representer):
         super(VarEmbedding, self).__init__()
@@ -379,11 +351,17 @@ class CEncoderModel(nn.Module):
                  dropout=0.3,
                  max_grad_norm=5.,
                  size_average=False,
-                 use_positional_embeddings=False):
+                 use_positional_embeddings=False,
+                 l2_reg=0.1):
         super().__init__()
         self.mode = mode
         self.l1_dict = l1_dict
+        self.l1_dict_idx = {v: k for k, v in l1_dict.items()}
         self.l2_dict = l2_dict
+        if self.l2_dict is not None:
+            self.l2_dict_idx = {v: k for k, v in l2_dict.items()}
+        else:
+            self.l2_dict_idx = None
         self.encoder = encoder
         self.decoder = decoder
         self.l2_encoder = l2_encoder
@@ -396,6 +374,7 @@ class CEncoderModel(nn.Module):
         self.emb_min = self.encoder.weight.min().item()
         self.use_positional_embeddings = use_positional_embeddings
         self.mask_unseen_l2 = 0
+        self.l2_reg = l2_reg
 
     def join_l2_weights(self,):
         #print(id(self.encoder.weight))
@@ -413,7 +392,14 @@ class CEncoderModel(nn.Module):
 
     def forward(self, batch, l2_seen, l2_unseen):
         raise NotImplementedError
-    
+
+    def regularize_l2_params(self, l2_params, l2_seen):
+        if l2_seen is None:
+            _r = 0.
+        else:
+            _r = 1.0 * torch.sum(l2_params[l2_seen, :] ** 2)
+        return _r
+
     def do_backprop(self, batch, l2_seen, total_batches=None):
         if l2_seen is not None and self.mask_unseen_l2 == 1:
             l2_unseen = set(range(len(self.l2_dict))) - set(l2_seen.cpu().tolist())
@@ -425,12 +411,18 @@ class CEncoderModel(nn.Module):
         if isinstance(self.encoder, VariationalEmbeddings):
             kl_loss = (1. / total_batches) * (self.encoder.log_q_w - self.encoder.log_p_w)
             _l += kl_loss
-
+        #if self.mode == CEncoderModel.L2_LEARNING:
+        #    _l += self.regularize_l2_params(self.l2_encoder.weight, l2_seen)
         _l.backward()
-        if self.mode == CEncoderModel.L2_LEARNING:
-            keep_grad = torch.zeros_like(self.l2_encoder.weight.grad)
-            keep_grad[l2_seen, :] = 1.0
-            self.l2_encoder.weight.grad *= keep_grad
+        if self.mode == CEncoderModel.L2_LEARNING and l2_unseen is not None and l2_seen is not None:
+            #keep_grad = torch.zeros_like(self.l2_encoder.weight.grad)
+            #keep_grad[l2_seen, :] = 1.0
+            #self.l2_encoder.weight.grad *= keep_grad
+            #if l2_seen.shape[0] > 1 and (batch[3] == 2).any().item():
+            #    if self.l2_encoder.weight.grad[l2_seen, :].sum().item() == 0.0:
+            #    assert self.l2_encoder.weight.grad[l2_seen, :].sum().item() != 0.0
+            #TODO: make these assertions work for interactive mode...
+            assert self.l2_encoder.weight.grad[l2_unseen, :].sum().item() == 0.0
         grad_norm = torch.nn.utils.clip_grad_norm_(filter(lambda p: p.requires_grad, self.parameters()),
                                                    self.max_grad_norm)
         if math.isnan(grad_norm):
@@ -532,9 +524,18 @@ class CEncoderModel(nn.Module):
         else:
             l1_embedding = self.encoder.weight.data
             #l2_embedding = self.l2_encoder.weight.data
-            #rank_score_embeddings(l2_embedding, l1_embedding, self.l2_key, self.l1_key)
             s = score_embeddings(l2_embedding, l1_embedding, self.l2_key, self.l1_key)
             return s
+
+    def rank_score_embeddings(self, l2_embedding):
+        if isinstance(self.encoder, VarEmbedding):
+            raise NotImplementedError("only word level scores")
+        else:
+            l1_embedding = self.encoder.weight.data
+            #l2_embedding = self.l2_encoder.weight.data
+            r = rank_score_embeddings(l2_embedding, l1_embedding, self.l2_key, self.l1_key)
+            return r
+
 
     def save_model(self, path):
         torch.save(self, path)

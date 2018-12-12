@@ -38,6 +38,7 @@ class PriorityQ(object):
     def length(self,):
         return len(self.queue)
 
+
 class MacaronicState(object):
     def __init__(self,
                  macaronic_sentences,
@@ -125,18 +126,19 @@ class MacaronicState(object):
         c.swap_token_counts = self.swap_token_counts
         return c
 
-    def random_next_state(self, model_config_func, **kwargs):
+    def random_next_state(self, apply_swap_func, **kwargs):
         raise NotImplementedError("has not been updated with the rest of the code")
         actions, action_weights = self.possible_actions()
         action = random.choices(population=actions, weights=action_weights, k=1)[0]
         c = self.copy()
         current_displayed_config = c.current_sentence()
         if action == NEXT_SENT:
-            new_score, new_weights = model_config_func(current_displayed_config,
-                                                       c.model,
-                                                       c.weights,
-                                                       kwargs['max_steps'],
-                                                       kwargs['improvement_threshold'])
+            new_score, new_weights = apply_swap_func(current_displayed_config,
+                                                     c.model,
+                                                     c.weights,
+                                                     kwargs['max_steps'],
+                                                     kwargs['improvement_threshold'],
+                                                     kwargs['reward_type'])
             c.weights = new_weights
             swap_token_count, swap_types = c.swap_counts()
             swap_type_count = len(swap_types)
@@ -153,25 +155,36 @@ class MacaronicState(object):
             swap_type_count = len(swap_types)
             return c
 
-    def next_state(self, action, model_config_func, **kwargs):
+    def next_state(self, action, apply_swap_func, **kwargs):
         assert isinstance(action, tuple)
         c = self.copy()
         current_displayed_config = c.current_sentence()
+        #print('')
+        #print(action, 'action')
+        #print(current_displayed_config)
+        #if action[0] == 39:
+        #    exit()
         if action == NEXT_SENT:
-            #TODO: why do we need to use model_config_func???
+            #TODO: why do we need to use apply_swap_func???
             swap_token_count, swap_types = c.swap_counts()
             swap_type_count = len(swap_types)
-            new_score, new_weights = model_config_func(current_displayed_config,
-                                                       c.model,
-                                                       c.weights,
-                                                       kwargs['max_steps'],
-                                                       kwargs['improvement_threshold'],
-                                                       swap_types)
-            c.weights = new_weights
+            swap_result = apply_swap_func(current_displayed_config,
+                                          c.model,
+                                          c.weights,
+                                          kwargs['max_steps'],
+                                          kwargs['improvement_threshold'],
+                                          kwargs['reward_type'],
+                                          swap_types if kwargs['accumulate_seen_l2'] == 1 else set())
+            c.weights = swap_result['weights']
             c.swap_token_counts = self.swap_token_counts
             assert swap_token_count == c.swap_token_counts
-            assert c.score == new_score - (kwargs['penalty'] * swap_type_count)
-            c.score = new_score - (kwargs['penalty'] * swap_type_count)
+            #print(c.score, new_score, swap_type_count)
+            if c.score == swap_result['score'] - (kwargs['penalty'] * swap_type_count):
+                pass
+            else:
+                pdb.set_trace()
+
+            c.score = swap_result['score'] - (kwargs['penalty'] * swap_type_count)
             if c.displayed_sentence_idx + 1 < len(c.macaronic_sentences):
                 c.displayed_sentence_idx = self.displayed_sentence_idx + 1
                 c.start_score = c.score
@@ -184,17 +197,18 @@ class MacaronicState(object):
             current_displayed_config.update_config(action)
             swap_token_count, swap_types = c.swap_counts()
             swap_type_count = len(swap_types)
-            new_score, _ = model_config_func(current_displayed_config,
-                                             c.model,
-                                             c.weights,
-                                             kwargs['max_steps'],
-                                             kwargs['improvement_threshold'],
-                                             swap_types)
+            swap_result = apply_swap_func(current_displayed_config,
+                                          c.model,
+                                          c.weights,
+                                          kwargs['max_steps'],
+                                          kwargs['improvement_threshold'],
+                                          kwargs['reward_type'],
+                                          swap_types if kwargs['accumulate_seen_l2'] == 1 else set())
             #c.weights = c.weights  # should not give new_weights here!
             c.swap_token_counts = self.swap_token_counts + (1 if action[1] else 0)
             assert swap_token_count == c.swap_token_counts
             #print('here!',  swap_token_count, c.swap_token_counts, swap_token_count == c.swap_token_counts)
-            c.score = new_score - (kwargs['penalty'] * swap_type_count)
+            c.score = swap_result['score'] - (kwargs['penalty'] * swap_type_count)
             return c
 
 

@@ -25,6 +25,9 @@ from src.models.model import make_wl_encoder
 from train import make_random_mask
 import time
 
+from src.rewards import batch_cosine_sim
+from src.rewards import get_nearest_neighbors
+
 from src.utils.utils import ParallelTextDataset
 from src.utils.utils import SPECIAL_TOKENS
 
@@ -75,19 +78,32 @@ def apply_swap_bp(macaronic_config, model, weights, max_steps=1, improvement_thr
     #model.init_param_freeze(CBiLSTM.L2_LEARNING)
     #model.init_optimizer(type='SGD')
     new_weights = model.do_bp_forward(var_batch, weights)
-    step_score_vocabtype = model.score_embeddings(new_weights)
-    return step_score_vocabtype, new_weights
+    cs_score = model.score_embeddings(new_weights)
+    rank_score = model.rank_score_embeddings(new_weights)
+    return cs_score, new_weights
 
 
-def apply_swap(macaronic_config, model, weights, max_steps=1, improvement_threshold=0.01, previous_seen_l2=None):
+def nearest_neighbors(l1_weights, l2_weights, l2, l1_dict_idx, l2_dict_idx): #macaronic_config, previous_seen_l2=set()):
+    l2_weights = l2_weights.type_as(l1_weights)
+    arg_top = get_nearest_neighbors(l2_weights,
+                                    l1_weights)
+    arg_top_seen = arg_top[torch.LongTensor(list(l2))]
+    nn = []
+    for idx, l2_idx in enumerate(list(l2)):
+        nn.append(' '.join([str(l2_idx).ljust(3), l2_dict_idx[l2_idx].ljust(15), ':'] +
+                           [l1_dict_idx[i] for i in arg_top_seen[idx].tolist()]))
+    nn = '\n'.join(nn).strip()
+    return nn
+
+
+def apply_swap(macaronic_config, model, weights, max_steps, improvement_threshold, reward_type, previous_seen_l2=set()):
+    unk_id = model.l2_dict[SPECIAL_TOKENS.UNK]
+    previous_seen_l2.add(unk_id)
     assert isinstance(macaronic_config, MacaronicSentence)
     l1_data = macaronic_config.int_l1.clone()
     l2_data = macaronic_config.int_l2.clone()
     swap_ind = torch.LongTensor(sorted(list(macaronic_config.swapped)))
-    if previous_seen_l2 is not None:
-        seen_l2 = macaronic_config.l2_swapped_types.union(previous_seen_l2)
-    else:
-        seen_l2 = macaronic_config.l2_swapped_types
+    seen_l2 = macaronic_config.l2_swapped_types.union(previous_seen_l2)
     flip_l2_set = torch.LongTensor(list(seen_l2))
     indicator = torch.LongTensor([1] * l1_data.size(1)).unsqueeze(0)
     indicator[:, swap_ind] = 2
@@ -96,36 +112,50 @@ def apply_swap(macaronic_config, model, weights, max_steps=1, improvement_thresh
         l1_data = l1_data.cuda()
         l2_data = l2_data.cuda()
         indicator = indicator.cuda()
-        mask = mask.cuda() #make_random_mask(l1_data, [l1_data.size(1)], 0.0, 0)
+        mask = mask.cuda()
         flip_l2_set = flip_l2_set.cuda()
     var_batch = [l1_data.size(1)], l1_data, l2_data, indicator, mask
     model.update_g_weights(weights)
     model.init_param_freeze(CBiLSTM.L2_LEARNING)
     model.init_optimizer(type='SGD')
+    #print('before')
+    #arg_top = model.rank_score_embeddings(model.l2_encoder.weight.data.clone(), seen_l2)
+    #arg_top_seen = arg_top[torch.LongTensor(list(macaronic_config.l2_swapped_types))]
+    #for idx, l2_idx in enumerate(list(macaronic_config.l2_swapped_types)):
+    #    print(model.l2_dict_idx[l2_idx], '-->', ' '.join([model.l1_dict_idx[i] for i in arg_top_seen[idx].tolist()]))
 
     #prev_loss = 100.
     num_steps = 0
     #improvement = 1.
     while num_steps < max_steps:  # and improvement > improvement_threshold:
         loss, acc, grad_norm = model.do_backprop(var_batch, l2_seen=flip_l2_set)  # (flip_l2, flip_l2_offset, flip_l2_set))
-        step_score_vocabtype = model.score_embeddings(model.l2_encoder.weight.data.clone())
+        if reward_type == 'ranking':
+            score = model.rank_score_embeddings(model.l2_encoder.weight.data.clone())
+        elif reward_type == 'cs':
+            score = model.score_embeddings(model.l2_encoder.weight.data.clone())
+        else:
+            raise BaseException("unknown reward_type")
         num_steps += 1
         #improvement = prev_loss - loss
         #prev_loss = loss
         #print(num_steps, 'step score', step_score_vocabtype, 'loss', loss)
     #new_weights = model.l2_encoder.weight.clone().detach().cpu()
     new_weights = model.get_weight()
-    return step_score_vocabtype, new_weights
+    nn = None  # get_nn(model, macaronic_config, seen_l2)
+    swap_result = {'score': score,
+                   'weights': new_weights,
+                   'neighbors': nn}
+    return swap_result
 
 
 def make_start_state(i2v, i2gv, init_weights, model, dl, **kwargs):
-    score_0 = model.score_embeddings(model.l2_encoder.weight.data.clone())
     macaronic_sentences = []
     for sent_idx, sent in enumerate(dl):
         lens, l1_data, l2_data, l1_text_data, l2_text_data = sent
         swapped = set([])
         not_swapped = set([])
-        swappable = set(range(1, l1_data[0, :].size(0) - 1))
+        #swappable = set([i for i in range(1, l1_data[0, :].size(0) - 1)])
+        swappable = set([idx for idx, i in enumerate(l2_data[0, :]) if i != gv2i[SPECIAL_TOKENS.UNK]][1:-1])
         l1_tokens = [SPECIAL_TOKENS.BOS] + l1_text_data[0].strip().split() + [SPECIAL_TOKENS.EOS] # [i2v[i.item()] for i in l1_data[0, :]]
         l2_tokens = [SPECIAL_TOKENS.BOS] + l2_text_data[0].strip().split() + [SPECIAL_TOKENS.EOS] # [i2gv[i.item()] for i in l2_data[0, :]]
         ms = MacaronicSentence(l1_tokens, l2_tokens,
@@ -134,24 +164,31 @@ def make_start_state(i2v, i2gv, init_weights, model, dl, **kwargs):
                                set([]), [],
                                kwargs['swap_limit'])
         macaronic_sentences.append(ms)
-        if len(macaronic_sentences) > 1000:
+        if len(macaronic_sentences) > kwargs['max_sentences']:
             break
-    state = MacaronicState(macaronic_sentences, 0, model, score_0, kwargs['binary_branching'])
+    init_score = apply_swap(macaronic_sentences[0],
+                            model,
+                            init_weights,
+                            kwargs['max_steps'],
+                            kwargs['improvement_threshold'],
+                            kwargs['reward_type'])
+    state = MacaronicState(macaronic_sentences, 0, model, init_score['score'], kwargs['binary_branching'])
     state.weights = init_weights
-    state.score = score_0
+    state.score = init_score['score']
     return state
 
 
-def beam_search_per_sentence(init_state, **kwargs):
+def beam_search_per_sentence(model, init_state, **kwargs):
     beam_size = kwargs['beam_size']
     best_state = init_state
     q = PriorityQ(beam_size)
     q.append(init_state)
+    sent_idx = 0
     while not best_state.terminal:
         while q.length() > 0:
             curr_state = q.pop(kwargs['stochastic'] == 1)
             if 'verbose' in kwargs and kwargs['verbose']:
-                print('curr_state\n', str(curr_state))
+                #print('curr_state\n', str(curr_state))
                 pass
             if curr_state.score >= best_state.score:
                 best_state = curr_state
@@ -167,23 +204,31 @@ def beam_search_per_sentence(init_state, **kwargs):
             pass
         else:
             assert q.length() == 0, "q should be empty at this point!"
+            macaronic_sentence = best_state.macaronic_sentences[best_state.displayed_sentence_idx]
+            print(sent_idx)
+            print(macaronic_sentence)
+            l2 = macaronic_sentence.l2_swapped_types
             actions, action_weights = best_state.possible_actions()
             assert NEXT_SENT in actions
             init_next_sentence_state = best_state.next_state(NEXT_SENT, apply_swap, **kwargs)
+            l1_weights = model.encoder.weight.data.detach().clone()
+            l2_weights = init_next_sentence_state.weights.detach().clone()
+            print(nearest_neighbors(l1_weights, l2_weights, l2, model.l1_dict_idx, model.l2_dict_idx))
+            print('')
             q.append(init_next_sentence_state)
+            sent_idx += 1
     return best_state
 
 
-def beam_search(init_state, **kwargs):
+def beam_search(model, init_state, **kwargs):
     beam_size = kwargs['beam_size']
     best_state = init_state
-
     q = PriorityQ(beam_size)
     q.append(init_state)
     while q.length() > 0:
         curr_state = q.pop(kwargs['stochastic'] == 1)
         if 'verbose' in kwargs and kwargs['verbose']:
-            print('curr_state\n', str(curr_state))
+            #print('curr_state\n', str(curr_state))
             pass
         if curr_state.score >= best_state.score and curr_state.terminal:
             best_state = curr_state
@@ -226,6 +271,7 @@ if __name__ == '__main__':
     opt.add_argument('--beam_size', action='store', dest='beam_size', default=10, type=int)
     opt.add_argument('--swap_limit', action='store', dest='swap_limit', default=0.3, type=float)
     opt.add_argument('--max_search_depth', action='store', dest='max_search_depth', default=10000, type=int)
+    opt.add_argument('--max_sentences', action='store', dest='max_sentences', default=10000, type=int)
     opt.add_argument('--random_walk', action='store', dest='random_walk', default=0, type=int, choices=[0, 1])
     opt.add_argument('--binary_branching', action='store', dest='binary_branching',
                      default=0, type=int, choices=[0, 1, 2])
@@ -233,6 +279,9 @@ if __name__ == '__main__':
     opt.add_argument('--improvement', action='store', dest='improvement_threshold', default=0.01, type=float)
     opt.add_argument('--penalty', action='store', dest='penalty', default=0.0, type=float)
     opt.add_argument('--verbose', action='store_true', dest='verbose', default=False)
+    opt.add_argument('--reward', action='store', dest='reward_type',type=str, choices=['ranking', 'cs'])
+    opt.add_argument('--accumulate_seen_l2', action='store', dest='accumulate_seen_l2', type=int, choices=[0, 1], default=1)
+    opt.add_argument('--debug_print', action='store_true', dest='debug_print', default=False)
     opt.add_argument('--seed', action='store', dest='seed', default=1234, type=int)
     options = opt.parse_args()
     print(options)
@@ -335,6 +384,12 @@ if __name__ == '__main__':
     cloze_model.set_key(l1_key, l2_key)
     cloze_model.init_key()
     cloze_model.l2_dict = gv2i
+    cloze_model.l1_dict_idx = {v: k for k, v in cloze_model.l1_dict.items()}  # TODO: this can be removed once new lms are built...
+    cloze_model.l2_dict_idx = {v: k for k, v in cloze_model.l2_dict.items()}
+    #en_en_sim = batch_cosine_sim(cloze_model.encoder.weight.data.clone(),
+    #                             cloze_model.encoder.weight.data.clone())
+    #_, en_en_neighbors = torch.topk(en_en_sim, 6, 1)
+    #cloze_model.en_en_neighbors = en_en_neighbors
     if isinstance(cloze_model, CBiLSTM) or \
        isinstance(cloze_model, CBiLSTMFast) or \
        isinstance(cloze_model, CBiLSTMFastMap):
@@ -353,6 +408,14 @@ if __name__ == '__main__':
         print('random walk completed', time.time() - now)
         print(str(random_state))
     else:
-        best_state = beam_search(start_state, **kwargs)
+        best_state = beam_search_per_sentence(cloze_model, start_state, **kwargs)
+        #best_state = beam_search(cloze_model, start_state, **kwargs)
         print('beam search completed', time.time() - now)
         print(str(best_state))
+        _, all_swapped_types = best_state.swap_counts()
+        print(all_swapped_types)
+        l1_weights = cloze_model.encoder.weight.data.detach().clone()
+        l2_weights = best_state.weights.detach().clone()
+        print(nearest_neighbors(l1_weights, l2_weights,
+                                all_swapped_types,
+                                cloze_model.l1_dict_idx, cloze_model.l2_dict_idx))

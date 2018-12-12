@@ -29,7 +29,7 @@ class Preprocess(object):
 
     def build(self, l1_data_dir, l2_data_dir, l2_save_dir):
         l1_vocab = pickle.load(open(os.path.join(l1_data_dir, 'l1.vocab.pkl'), 'rb'))
-        #l1_idx2v = pickle.load(open(os.path.join(l1_data_dir, 'l1.idx2v.pkl'), 'rb'))
+        l1_idx2v = pickle.load(open(os.path.join(l1_data_dir, 'l1.idx2v.pkl'), 'rb'))
         l1_v2idx = pickle.load(open(os.path.join(l1_data_dir, 'l1.v2idx.pkl'), 'rb'))
         #l1_vidx2spelling = pickle.load(open(os.path.join(l1_data_dir, 'l1.vidx2spelling.pkl'), 'rb'))
         #l1_vidx2unigram_prob = pickle.load(open(os.path.join(l1_data_dir, 'l1.vidx2unigram_prob.pkl'), 'rb'))
@@ -56,13 +56,21 @@ class Preprocess(object):
                         l2_v2idx[l2_w] = l2_w_idx
                         l2_idx2v[l2_w_idx] = l2_w
 
-                    if l1_w in l1_v2idx and l2_w in l2_v2idx:
+                    if l1_w in l1_v2idx and l2_w in l2_v2idx and \
+                        l1_w not in [SPECIAL_TOKENS.PAD, SPECIAL_TOKENS.BOS, SPECIAL_TOKENS.EOS, SPECIAL_TOKENS.UNK] and \
+                            l2_w not in [SPECIAL_TOKENS.PAD, SPECIAL_TOKENS.BOS, SPECIAL_TOKENS.EOS, SPECIAL_TOKENS.UNK]:
                         key.add((l1_v2idx[l1_w], l2_v2idx[l2_w]))
                         print(l1_w, l2_w, l1_v2idx[l1_w], l2_v2idx[l2_w])
+        key = list(sorted(key))
         assert len(l2_v2idx) == len(l2_idx2v)
         pickle.dump(l2_v2idx, open(os.path.join(l2_save_dir, 'l2.v2idx.pkl'), 'wb'))
         pickle.dump(l2_idx2v, open(os.path.join(l2_save_dir, 'l2.idx2v.pkl'), 'wb'))
         pickle.dump(key, open(os.path.join(l2_save_dir, 'l1.l2.key.pkl'), 'wb'))
+        txt_key = open(os.path.join(l2_save_dir, 'key.txt'), 'w', encoding='utf-8')
+        for l1idx, l2idx in key:
+            txt = str(l1idx) + ' ' + l1_idx2v[l1idx] + ' ' + ' ' + str(l2idx) + ' ' + l2_idx2v[l2idx] + '\n'
+            txt_key.write(txt)
+        txt_key.close()
         info = open(os.path.join(l2_save_dir, 'INFO.FILE'), 'w')
         info.write("the l2*pkl files and l1.l2.key.pkl file was created using the l1 vocabulary from:" + l1_data_dir)
         info.close()
