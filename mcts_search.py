@@ -21,6 +21,7 @@ from src.states.mcts_states import SearchNode
 from src.states.mcts_states import SearchTree
 from search import apply_swap
 from search import beam_search
+from search import beam_search_per_sentence
 from search import random_walk
 from search import make_start_state
 from train import make_cl_decoder
@@ -54,6 +55,8 @@ if __name__ == '__main__':
     opt.add_argument('--gpuid', action='store', type=int, dest='gpuid', default=-1)
     opt.add_argument('--cloze_model', action='store', dest='cloze_model', required=True)
     opt.add_argument('--stochastic', action='store', dest='stochastic', default=0, type=int, choices=[0, 1])
+    opt.add_argument('--joined_l2_l1', action='store', dest='joined_l2_l1', default=0, type=int, choices=[0, 1])
+    opt.add_argument('--mask_unseen_l2', action='store', dest='mask_unseen_l2', default=1, type=int, choices=[0, 1])
     opt.add_argument('--swap_limit', action='store', dest='swap_limit', default=0.3, type=float)
     opt.add_argument('--key', action='store', dest='key', required=True)
     opt.add_argument('--penalty', action='store', dest='penalty', default=0.2, type=float)
@@ -65,7 +68,7 @@ if __name__ == '__main__':
                      type=str, choices=['ave', 'max'])
     opt.add_argument('--max_search_depth', action='store', dest='max_search_depth', default=1000, type=int)
     opt.add_argument('--rollout_function', action='store', dest='rollout_function', default='beam_search', type=str,
-                     choices=['beam_search', 'random_walk'])
+                     choices=['beam_search', 'random_walk', 'beam_search_per_sentence'])
     opt.add_argument('--rollout_binary_branching', action='store', dest='rollout_binary_branching', default=1, type=int,
                      choices=[0, 1])
     opt.add_argument('--verbose', action='store_true', dest='verbose', default=False)
@@ -163,6 +166,11 @@ if __name__ == '__main__':
     else:
         raise NotImplementedError("unknown cloze_model" + str(type(cloze_model)))
 
+    if options.joined_l2_l1:
+        assert not isinstance(cloze_model, CBiLSTMFastMap)
+        cloze_model.join_l2_weights()
+    cloze_model.mask_unseen_l2 = options.mask_unseen_l2
+
     if options.gpuid > -1:
         cloze_model.init_cuda()
     cloze_model.set_key(l1_key, l2_key)
@@ -182,8 +190,12 @@ if __name__ == '__main__':
     game = Game(cloze_model, apply_swap, opt=kwargs)
     if options.rollout_function == 'random_walk':
         search_tree = SearchTree(game, options.backup_type, random_walk, kwargs, apply_swap)
-    else:
+    elif options.rollout_function == 'beam_search':
         search_tree = SearchTree(game, options.backup_type, beam_search, kwargs, apply_swap)
+    elif options.rollout_function == 'beam_search_per_sentence':
+        search_tree = SearchTree(game, options.backup_type, beam_search_per_sentence, kwargs, apply_swap)
+    else:
+        raise BaseException("unknown rollout_function")
     start_state = make_start_state(i2v, i2gv, init_weights, cloze_model, dataset, **kwargs)
     possible_actions, possible_action_weights = start_state.possible_actions()
     unexpanded_actions = {a: None for a in possible_actions}

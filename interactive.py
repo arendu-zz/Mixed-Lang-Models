@@ -7,6 +7,8 @@ import torch
 from src.models.model import CBiLSTM
 from src.models.model import CBiLSTMFast
 from src.models.map_model import CBiLSTMFastMap
+from src.models.cloze_model import L1_Cloze_Model
+from src.models.cloze_model import L2_Cloze_Model
 from src.models.model import CTransformerEncoder
 from src.models.model import VarEmbedding
 from src.models.model import WordRepresenter
@@ -16,7 +18,6 @@ from src.models.model import make_cl_encoder
 from src.models.model import make_wl_decoder
 from src.models.model import make_wl_encoder
 from search import apply_swap
-from search import apply_swap_bp
 from search import nearest_neighbors
 
 from src.utils.utils import ParallelTextDataset
@@ -52,6 +53,7 @@ if __name__ == '__main__':
     opt.add_argument('--binary_branching', action='store', dest='binary_branching',
                      default=0, type=int, choices=[0, 1, 2])
     opt.add_argument('--max_steps', action='store', dest='max_steps', default=1, type=int)
+    opt.add_argument('--l2_iters', action='store', dest='l2_iters', default=0, type=int)
     opt.add_argument('--improvement', action='store', dest='improvement_threshold', default=0.01, type=float)
     opt.add_argument('--penalty', action='store', dest='penalty', default=0.0, type=float)
     opt.add_argument('--verbose', action='store_true', dest='verbose', default=False)
@@ -76,97 +78,40 @@ if __name__ == '__main__':
     l1_key, l2_key = zip(*pickle.load(open(options.key, 'rb')))
     l2_key = torch.LongTensor(list(l2_key))
     l1_key = torch.LongTensor(list(l1_key))
-    train_mode = CBiLSTM.L2_LEARNING
     dataset = ParallelTextDataset(options.parallel_corpus, v2i, gv2i)
     v_max_vocab = len(v2i)
     g_max_vocab = len(gv2i) if gv2i is not None else 0
-    cloze_model = torch.load(options.cloze_model, map_location=lambda storage, loc: storage)
-
-    if isinstance(cloze_model.encoder, VarEmbedding):
-        gv2c, c2i = None, None
-        wr = cloze_model.encoder.word_representer
-        we_size = wr.we_size
-        learned_l1_weights = cloze_model.encoder.word_representer()
-        g_wr = WordRepresenter(gv2c, c2i, len(c2i), wr.ce_size,
-                               c2i[SPECIAL_TOKENS.PAD], wr.cr_size, we_size,
-                               bidirectional=wr.bidirectional, dropout=wr.dropout,
-                               num_required_vocab=max(v_max_vocab, g_max_vocab))
-        for (name_op, op), (name_p, p) in zip(wr.named_parameters(), g_wr.named_parameters()):
-            assert name_p == name_op
-            if name_op == 'extra_ce_layer.weight':
-                pass
-            else:
-                p.data.copy_(op.data)
-        g_wr.set_extra_feat_learnable(True)
-        if options.gpuid > -1:
-            g_wr.init_cuda()
-        g_cl_encoder = make_cl_encoder(g_wr)
-        g_cl_decoder = make_cl_decoder(g_wr)
-        encoder = make_wl_encoder(None, None, learned_l1_weights.data.clone())
-        decoder = make_wl_decoder(encoder)
-        cloze_model.encoder = encoder
-        cloze_model.decoder = decoder
-        cloze_model.l2_encoder = g_cl_encoder
-        cloze_model.l2_decoder = g_cl_decoder
-        cloze_model.init_param_freeze(CBiLSTM.L2_LEARNING)
-    elif isinstance(cloze_model, CBiLSTM) or isinstance(cloze_model, CBiLSTMFast):
-        learned_l1_weights = cloze_model.encoder.weight.data.clone()
-        we_size = cloze_model.encoder.weight.size(1)
-        encoder = make_wl_encoder(None, None, learned_l1_weights)
-        decoder = make_wl_decoder(encoder)
-        g_wl_encoder = make_wl_encoder(g_max_vocab, we_size, None)
-        g_wl_decoder = make_wl_decoder(g_wl_encoder)
-        cloze_model.encoder = encoder
-        cloze_model.decoder = decoder
-        cloze_model.l2_encoder = g_wl_encoder
-        cloze_model.l2_decoder = g_wl_decoder
-        cloze_model.init_param_freeze(CBiLSTM.L2_LEARNING)
-    elif isinstance(cloze_model, CBiLSTMFastMap):
-        print('here')
-        learned_l1_weights = cloze_model.encoder.weight.data.clone()
-        we_size = cloze_model.encoder.weight.size(1)
-        encoder = make_wl_encoder(None, None, learned_l1_weights)
-        decoder = make_wl_decoder(encoder)
-        g_wl_encoder = make_wl_encoder(g_max_vocab, we_size, None)
-        g_wl_decoder = make_wl_decoder(g_wl_encoder)
-        cloze_model.encoder = encoder
-        cloze_model.decoder = decoder
-        map_weights = torch.FloatTensor(g_max_vocab, v_max_vocab).uniform_(-0.01, 0.01)
-        cloze_model.init_l2_weights(map_weights)
-        cloze_model.init_param_freeze(CBiLSTM.L2_LEARNING)
-    elif isinstance(cloze_model, CTransformerEncoder):
-        learned_weights = cloze_model.encoder.weight.data.clone()
-        we_size = cloze_model.encoder.weight.size(1)
-        encoder = make_wl_encoder(None, None, learned_weights)
-        decoder = make_wl_decoder(encoder)
-        g_wl_encoder = make_wl_encoder(g_max_vocab, we_size, None)
-        g_wl_decoder = make_wl_decoder(g_wl_encoder)
-        cloze_model.encoder = encoder
-        cloze_model.decoder = decoder
-        cloze_model.l2_encoder = g_wl_encoder
-        cloze_model.l2_decoder = g_wl_decoder
-        cloze_model.init_param_freeze(CBiLSTM.L2_LEARNING)
-    else:
-        raise NotImplementedError("unknown cloze_model" + str(type(cloze_model)))
-
+    l1_cloze_model = torch.load(options.cloze_model, map_location=lambda storage, loc: storage)
+    we_size = l1_cloze_model.encoder.weight.size(1)
+    l2_encoder = make_wl_encoder(g_max_vocab, we_size, None)
+    l2_decoder = make_wl_decoder(l2_encoder)
+    cloze_model = L2_Cloze_Model(l1_cloze_model.encoder,
+                                 l1_cloze_model.decoder,
+                                 l1_cloze_model.rnn,
+                                 l1_cloze_model.linear,
+                                 l1_cloze_model.l1_dict,
+                                 l2_encoder,
+                                 l2_decoder,
+                                 gv2i,
+                                 l1_key,
+                                 l2_key,
+                                 options.mask_unseen_l2)
     if options.joined_l2_l1:
-        assert not isinstance(cloze_model, CBiLSTMFastMap)
+        #TODO: joinin the new scheme
         cloze_model.join_l2_weights()
-    cloze_model.mask_unseen_l2 = options.mask_unseen_l2
 
     if options.gpuid > -1:
         cloze_model.init_cuda()
-    cloze_model.set_key(l1_key, l2_key)
     cloze_model.init_key()
-    cloze_model.l2_dict = gv2i
-    cloze_model.l1_dict_idx = {v: k for k, v in cloze_model.l1_dict.items()}  # TODO: this can be removed once new lms are built...
-    cloze_model.l2_dict_idx = {v: k for k, v in cloze_model.l2_dict.items()}
-    if isinstance(cloze_model, CBiLSTM) or \
-       isinstance(cloze_model, CBiLSTMFast) or \
-       isinstance(cloze_model, CBiLSTMFastMap):
-        cloze_model.train()
+    #en_en_sim = batch_cosine_sim(cloze_model.encoder.weight.data.clone(),
+    #                             cloze_model.encoder.weight.data.clone())
+    #_, en_en_neighbors = torch.topk(en_en_sim, 6, 1)
+    #cloze_model.en_en_neighbors = en_en_neighbors
+    cloze_model.train()
 
+    kwargs = vars(options)
     print(cloze_model)
+    cloze_model.l2_iters = options.l2_iters
     macaronic_sents = []
     sent_init_weights = cloze_model.get_weight()
     hist_flip_l2 = {}
@@ -204,21 +149,19 @@ if __name__ == '__main__':
                 new_macaronic.update_config((a, True))
             if options.verbose:
                 print(new_macaronic)
-            swap_result = apply_swap(macaronic_0,
-                                     cloze_model,
-                                     sent_init_weights,
-                                     options.max_steps,
-                                     options.improvement_threshold,
-                                     options.reward_type,
-                                     macaronic_0.l2_swapped_types)
-            print('init score', swap_result['score'])
+            #swap_result = apply_swap(macaronic_0,
+            #                         cloze_model,
+            #                         sent_init_weights,
+            #                         options.max_steps,
+            #                         options.improvement_threshold,
+            #                         options.reward_type,
+            #                         macaronic_0.l2_swapped_types)
+            #print('init score', swap_result['score'])
             swap_result = apply_swap(new_macaronic,
                                      cloze_model,
                                      sent_init_weights,
-                                     options.max_steps,
-                                     options.improvement_threshold,
-                                     options.reward_type,
-                                     new_macaronic.l2_swapped_types)
+                                     new_macaronic.l2_swapped_types,
+                                     **kwargs)
             print('swap score:', swap_result['score'])
             print('swap score + penalty:', swap_result['score'] - options.penalty * len(total_swap_types.union(new_macaronic.l2_swapped_types)))
             l1_weights = cloze_model.encoder.weight.data.detach().clone()

@@ -17,6 +17,7 @@ from src.opt.noam import NoamOpt
 from src.rewards import score_embeddings
 
 
+
 class MapLinear(nn.Module):
     def __init__(self, l1_weights, map_weights):
         super(MapLinear, self).__init__()
@@ -92,7 +93,12 @@ class CEncoderModelMap(nn.Module):
         super().__init__()
         self.mode = mode
         self.l1_dict = l1_dict
+        self.l1_dict_idx = {v: k for k, v in l1_dict.items()}
         self.l2_dict = l2_dict
+        if self.l2_dict is not None:
+            self.l2_dict_idx = {v: k for k, v in l2_dict.items()}
+        else:
+            self.l2_dict_idx = None
         self.encoder = encoder
         self.decoder = decoder
         self.dropout_val = dropout
@@ -276,6 +282,16 @@ class CBiLSTMFastMap(CEncoderModelMap):
 
     def is_cuda(self,):
         return self.rnn.weight_hh_l0.is_cuda
+
+    def mix_inputs(self, l1_channel, l2_channel, l1_idxs, l2_idxs):
+        g_inp_ind = l2_idxs.unsqueeze(2).expand(l2_idxs.size(0), l2_idxs.size(1), l2_channel.size(2)).float()
+        v_inp_ind = l1_idxs.unsqueeze(2).expand(l1_idxs.size(0), l1_idxs.size(1), l1_channel.size(2)).float()
+        encoded = v_inp_ind * l1_channel + g_inp_ind * l2_channel
+        #tmp_encoded = l1_encoded * l1_idxs.unsqueeze(2).expand_as(l1_encoded).float() + \
+        #    l2_encoded * l2_idxs.unsqueeze(2).expand_as(l2_encoded).float()
+        #assert (encoded - tmp_encoded).sum().item() == 0
+        return encoded
+
 
     def forward(self, batch):
         lengths, l1_data, l2_data, ind, word_mask = batch

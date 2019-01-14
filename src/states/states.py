@@ -2,7 +2,7 @@
 __author__ = 'arenduchintala'
 import copy
 import random
-import pdb
+import json
 
 from src.utils.utils import TEXT_EFFECT
 
@@ -16,7 +16,7 @@ class PriorityQ(object):
 
     def append(self, item):
         self.queue.append(item)
-        self.queue.sort(key=lambda x: (x.score, -x.swap_token_counts), reverse=True)
+        self.queue.sort(key=lambda x: (x.score, x.swap_token_counts), reverse=True)
         self.queue = self.queue[:self.maxsize]  # keep best successors
 
     def pop(self, stochastic=False):
@@ -58,6 +58,13 @@ class MacaronicState(object):
 
     def tie_break_score(self,):
         return (self.score, -self.swap_token_counts)  # to break ties
+
+    def to_json(self,):
+        j = []
+        for sent_id, sent in enumerate(self.macaronic_sentences):
+            s = sent.to_json()
+            j.append(s)
+        return json.dumps(j)
 
     def __str__(self,):
         s = []
@@ -126,90 +133,68 @@ class MacaronicState(object):
         c.swap_token_counts = self.swap_token_counts
         return c
 
-    def random_next_state(self, apply_swap_func, **kwargs):
-        raise NotImplementedError("has not been updated with the rest of the code")
-        actions, action_weights = self.possible_actions()
-        action = random.choices(population=actions, weights=action_weights, k=1)[0]
-        c = self.copy()
-        current_displayed_config = c.current_sentence()
-        if action == NEXT_SENT:
-            new_score, new_weights = apply_swap_func(current_displayed_config,
-                                                     c.model,
-                                                     c.weights,
-                                                     kwargs['max_steps'],
-                                                     kwargs['improvement_threshold'],
-                                                     kwargs['reward_type'])
-            c.weights = new_weights
-            swap_token_count, swap_types = c.swap_counts()
-            swap_type_count = len(swap_types)
-            c.score = new_score - (kwargs['penalty'] * swap_type_count)
-            if c.displayed_sentence_idx + 1 < len(c.macaronic_sentences):
-                c.displayed_sentence_idx = self.displayed_sentence_idx + 1
-            else:
-                c.terminal = True
-            return c
-        else:
-            current_displayed_config.update_config(action)
-            c.weights = c.weights  # should not give new_weights here!
-            swap_token_count, swap_types = c.swap_counts()
-            swap_type_count = len(swap_types)
-            return c
-
     def next_state(self, action, apply_swap_func, **kwargs):
         assert isinstance(action, tuple)
+        assert kwargs['reward_type'] == 'type_mrr_assist_check'
         c = self.copy()
         current_displayed_config = c.current_sentence()
-        #print('')
-        #print(action, 'action')
-        #print(current_displayed_config)
-        #if action[0] == 39:
-        #    exit()
+        #print(c)
         if action == NEXT_SENT:
             #TODO: why do we need to use apply_swap_func???
             swap_token_count, swap_types = c.swap_counts()
-            swap_type_count = len(swap_types)
             swap_result = apply_swap_func(current_displayed_config,
                                           c.model,
                                           c.weights,
-                                          kwargs['max_steps'],
-                                          kwargs['improvement_threshold'],
-                                          kwargs['reward_type'],
-                                          swap_types if kwargs['accumulate_seen_l2'] == 1 else set())
+                                          swap_types,
+                                          **kwargs)
             c.weights = swap_result['weights']
             c.swap_token_counts = self.swap_token_counts
             assert swap_token_count == c.swap_token_counts
-            #print(c.score, new_score, swap_type_count)
-            if c.score == swap_result['score'] - (kwargs['penalty'] * swap_type_count):
-                pass
-            else:
-                pdb.set_trace()
+            #if c.score != c.start_score + (swap_result['score'] - (kwargs['penalty'] * swap_type_count)):
+            #if c.score != c.start_score + swap_result['score']:
+            if c.score != swap_result['score']:
+                raise BaseException("c.score may not correct!")
 
-            c.score = swap_result['score'] - (kwargs['penalty'] * swap_type_count)
+            #c.score = c.start_score + (swap_result['score'] - (kwargs['penalty'] * swap_type_count))
+            #c.score = c.start_score + swap_result['score']
+            c.score = swap_result['score']
             if c.displayed_sentence_idx + 1 < len(c.macaronic_sentences):
                 c.displayed_sentence_idx = self.displayed_sentence_idx + 1
                 c.start_score = c.score
+                #TODO:# should the score be set to 0??
             else:
                 c.start_score = c.start_score
+                #TODO:# should the score be set to 0??
                 c.terminal = True
-            return c
+            next_state = c
         else:
             #print(action)
+            #print('before', current_displayed_config)
             current_displayed_config.update_config(action)
-            swap_token_count, swap_types = c.swap_counts()
-            swap_type_count = len(swap_types)
-            swap_result = apply_swap_func(current_displayed_config,
-                                          c.model,
-                                          c.weights,
-                                          kwargs['max_steps'],
-                                          kwargs['improvement_threshold'],
-                                          kwargs['reward_type'],
-                                          swap_types if kwargs['accumulate_seen_l2'] == 1 else set())
-            #c.weights = c.weights  # should not give new_weights here!
-            c.swap_token_counts = self.swap_token_counts + (1 if action[1] else 0)
-            assert swap_token_count == c.swap_token_counts
-            #print('here!',  swap_token_count, c.swap_token_counts, swap_token_count == c.swap_token_counts)
-            c.score = swap_result['score'] - (kwargs['penalty'] * swap_type_count)
-            return c
+            #print('after', current_displayed_config)
+            if action[1] or action[0] == 1:
+                swap_token_count, swap_types = c.swap_counts()
+                #swap_type_count = len(swap_types)
+                c.swap_token_counts = self.swap_token_counts + (1 if action[1] else 0)
+                swap_result = apply_swap_func(current_displayed_config,
+                                              c.model,
+                                              c.weights,
+                                              swap_types,
+                                              **kwargs)
+                #c.weights = c.weights  # should not give new_weights here!
+                #print('here!',  swap_token_count, c.swap_token_counts, swap_token_count == c.swap_token_counts)
+                #c.score = c.start_score + (swap_result['score'] - (kwargs['penalty'] * swap_type_count))
+                #c.score = c.start_score + swap_result['score']
+                c.score = swap_result['score']
+                c.swap_token_counts = self.swap_token_counts + (1 if action[1] else 0)
+                assert swap_token_count == c.swap_token_counts
+            else:
+                #assert self.score == swap_result['score'] - (kwargs['penalty'] * swap_type_count)
+                c.score = self.score
+                c.swap_token_counts = self.swap_token_counts
+            next_state = c
+        #print(next_state)
+        return next_state
 
 
 class MacaronicSentence(object):
@@ -218,7 +203,9 @@ class MacaronicSentence(object):
                  int_l1, int_l2,
                  swapped, not_swapped, swappable,
                  l2_swapped_types, l2_swapped_tokens,
-                 swap_limit):
+                 swap_limit,
+                 l1_key,
+                 l2_key):
         self.__tokens_l1 = tokens_l1
         self.__tokens_l2 = tokens_l2
         self.__int_l1 = int_l1
@@ -228,10 +215,20 @@ class MacaronicSentence(object):
         self.__swappable = swappable  # set([idx for idx, tl2 in enumerate(tokens_l2)][1:-1])
         self.__l2_swapped_types = l2_swapped_types
         self.__l2_swapped_tokens = l2_swapped_tokens
+        self.__l1_key = l1_key
+        self.__l2_key = l2_key
         self.swap_limit = swap_limit
         assert type(self.__tokens_l1) == list
         assert len(self.__tokens_l1) == len(self.__tokens_l2)
         self.len = len(self.__tokens_l2)
+
+    @property
+    def l2_key(self,):
+        return self.__l2_key
+
+    @property
+    def l1_key(self,):
+        return self.__l1_key
 
     @property
     def l2_swapped_types(self,):
@@ -299,7 +296,9 @@ class MacaronicSentence(object):
                                            copy.deepcopy(self.swappable),
                                            copy.deepcopy(self.__l2_swapped_types),  # this  does change so we deepcopy
                                            copy.deepcopy(self.__l2_swapped_tokens),
-                                           self.swap_limit)
+                                           self.swap_limit,
+                                           self.l1_key, # also does not change do no need to clone
+                                           self.l2_key)
         return macaronic_copy
 
     def color_it(self, w1, w2, w_idx):
@@ -308,12 +307,28 @@ class MacaronicSentence(object):
         elif w_idx in self.not_swapped:
             return TEXT_EFFECT.YELLOW + w1 + TEXT_EFFECT.END
         else:
-            return w1
+            return TEXT_EFFECT.YELLOW + w1 + TEXT_EFFECT.END
+
+    def to_obj_list(self):
+        j = []
+        for idx, tl1, tl2, il1, il2 in zip(range(self.len), self.tokens_l1, self.tokens_l2, self.int_l1.view(-1), self.int_l2.view(-1)):
+            w = {'idx': idx,
+                 'display': 'l2' if idx in self.swapped else 'l1',
+                 'l1_token': tl1,
+                 'l2_token': tl2,
+                 'l1_vid': il1.item(),
+                 'l2_vid': il2.item(),
+                 'nearest_neighbors': []}
+            j.append(w)
+        return j
+
+    def to_json(self,):
+        return json.dumps(self.to_obj_list())
 
     def display_macaronic(self,):
         s = [self.color_it(tl1, tl2, idx)
              for idx, tl1, tl2 in zip(range(self.len), self.tokens_l1, self.tokens_l2)]
-        return ' '.join(s)
+        return ' '.join(s[1:-1])
 
     def __str__(self,):
         return self.display_macaronic()

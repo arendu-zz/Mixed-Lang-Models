@@ -2,15 +2,43 @@
 import os
 import pickle
 import argparse
+import torch
 from utils.utils import SPECIAL_TOKENS
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_dir', type=str, required=True,
                         help="data directory path, in this folder a corpus.txt file is expected")
+    parser.add_argument('--wordvecs', action='store', dest='word_vec_file', required=True)
     parser.add_argument('--max_word_len', type=int, default=20, help='ignore words longer than this')
-    parser.add_argument('--max_vocab', type=int, default=50000, help='only keep most frequent words')
+    parser.add_argument('--max_vocab', type=int, default=100000, help='only keep most frequent words')
     return parser.parse_args()
+
+def load_word_vec(_file, voc2i):
+    wv = {}
+    for l in open(_file, 'r', encoding='utf8').readlines():
+        i = l.strip().split()
+        if len(i) == 301:
+            w = i[0][0].lower() + i[0][1:]
+            v = torch.Tensor([float(f) for f in i[1:]]).unsqueeze(0)
+            if w in voc2i:  # in the vocab list that we have already created
+                if w in wv:  # in the set of vocab that we have seen another form i.e. different capitalization
+                    wv[w] = torch.cat((wv[w], v), dim=0)
+                else:
+                    wv[w] = v
+            else:
+                pass
+    print(len(wv), 'normalized vocab from word_vec_file')
+    mat = torch.FloatTensor(len(voc2i), 300).uniform_(-1.0, 1.0)
+    missing = []
+    for v, i in voc2i.items():
+        if v in wv:
+            mat[i] = wv[v].mean(dim=0)
+        else:
+            missing.append(v)
+    print(len(missing), 'got random vec')
+    return mat
 
 
 def to_str(lst):
@@ -18,7 +46,7 @@ def to_str(lst):
 
 
 class Preprocess(object):
-    def __init__(self):
+    def __init__(self,):
         # spl sym for words
         self.spl_words = set([SPECIAL_TOKENS.PAD,
                               SPECIAL_TOKENS.BOS,
@@ -105,7 +133,7 @@ class Preprocess(object):
         assert len(idx2c) == len(c2idx)
         pickle.dump(idx2c, open(os.path.join(data_dir, 'l1.idx2c.pkl'), 'wb'))
         pickle.dump(c2idx, open(os.path.join(data_dir, 'l1.c2idx.pkl'), 'wb'))
-        return True
+        return v2idx
 
 
 if __name__ == '__main__':
@@ -113,8 +141,10 @@ if __name__ == '__main__':
     preprocess = Preprocess()
     corpus_file = os.path.join(args.data_dir, 'corpus.en')
     dev_file = os.path.join(args.data_dir, 'dev.en')
-    preprocess.build(data_dir=args.data_dir,
-                     corpus_file=corpus_file,
-                     dev_file=dev_file,
-                     max_word_len=args.max_word_len,
-                     max_vocab=args.max_vocab)
+    v2idx = preprocess.build(data_dir=args.data_dir,
+                             corpus_file=corpus_file,
+                             dev_file=dev_file,
+                             max_word_len=args.max_word_len,
+                             max_vocab=args.max_vocab)
+    embedding = load_word_vec(args.word_vec_file, v2idx)
+    torch.save(embedding, os.path.join(args.data_dir, 'l1.mat.pt')) 

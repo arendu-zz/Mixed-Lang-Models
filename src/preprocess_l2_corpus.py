@@ -41,9 +41,11 @@ class Preprocess(object):
         l2_vidx2spelling = {}  # TODO
         l2_c2idx = {}  # TODO
         l2_idx2c = {}  # TODO
-        key = set([])
+        full_data_key = set([])
+        line_keys = []
         with open(os.path.join(l2_data_dir, 'parallel_corpus'), 'r', encoding='utf-8') as f:
             for line in f:
+                line_key = set()
                 l1_line, l2_line = line.split('|||')
                 l1_line_txt = l1_line.strip().split()
                 l2_line_txt = l2_line.strip().split()
@@ -59,15 +61,18 @@ class Preprocess(object):
                     if l1_w in l1_v2idx and l2_w in l2_v2idx and \
                         l1_w not in [SPECIAL_TOKENS.PAD, SPECIAL_TOKENS.BOS, SPECIAL_TOKENS.EOS, SPECIAL_TOKENS.UNK] and \
                             l2_w not in [SPECIAL_TOKENS.PAD, SPECIAL_TOKENS.BOS, SPECIAL_TOKENS.EOS, SPECIAL_TOKENS.UNK]:
-                        key.add((l1_v2idx[l1_w], l2_v2idx[l2_w]))
+                        full_data_key.add((l1_v2idx[l1_w], l2_v2idx[l2_w]))
+                        line_key.add((l1_v2idx[l1_w], l2_v2idx[l2_w]))
                         print(l1_w, l2_w, l1_v2idx[l1_w], l2_v2idx[l2_w])
-        key = list(sorted(key))
+                line_keys.append(list(sorted(line_key)))
+        full_data_key = list(sorted(full_data_key))
         assert len(l2_v2idx) == len(l2_idx2v)
         pickle.dump(l2_v2idx, open(os.path.join(l2_save_dir, 'l2.v2idx.pkl'), 'wb'))
         pickle.dump(l2_idx2v, open(os.path.join(l2_save_dir, 'l2.idx2v.pkl'), 'wb'))
-        pickle.dump(key, open(os.path.join(l2_save_dir, 'l1.l2.key.pkl'), 'wb'))
-        txt_key = open(os.path.join(l2_save_dir, 'key.txt'), 'w', encoding='utf-8')
-        for l1idx, l2idx in key:
+        pickle.dump(full_data_key, open(os.path.join(l2_save_dir, 'l1.l2.key.pkl'), 'wb'))
+        pickle.dump(line_keys, open(os.path.join(l2_save_dir, 'per_line.l1.l2.key.pkl'), 'wb'))
+        txt_key = open(os.path.join(l2_save_dir, 'full_data_key.txt'), 'w', encoding='utf-8')
+        for l1idx, l2idx in full_data_key:
             txt = str(l1idx) + ' ' + l1_idx2v[l1idx] + ' ' + ' ' + str(l2idx) + ' ' + l2_idx2v[l2idx] + '\n'
             txt_key.write(txt)
         txt_key.close()
