@@ -281,6 +281,9 @@ if __name__ == '__main__':
                      help='gloss vocab to index pickle obj')
     opt.add_argument('--gpuid', action='store', type=int, dest='gpuid', default=-1)
     opt.add_argument('--cloze_model', action='store', dest='cloze_model', required=True)
+    opt.add_argument('--use_orthographic_model', action='store', type=int, dest='use_orthographic_model',
+                     choices=[0, 1, 2], default=0)
+    opt.add_argument('--l2_init_weights', action='store', dest='l2_init_weights', required=False, default="")
     opt.add_argument('--key', action='store', dest='key', required=True)
     opt.add_argument('--per_line_key', action='store', dest='per_line_key', required=True)
     opt.add_argument('--stochastic', action='store', dest='stochastic', default=0, type=int, choices=[0, 1])
@@ -336,19 +339,24 @@ if __name__ == '__main__':
     g_max_vocab = len(gv2i)
     l1_cloze_model = torch.load(options.cloze_model, map_location=lambda storage, loc: storage)
     we_size = l1_cloze_model.encoder.weight.size(1)
-    l2_encoder = make_wl_encoder(g_max_vocab, we_size, None)
-
-    cloze_model = L2_MSE_CLOZE(l1_cloze_model.encoder,
-                               l1_cloze_model.rnn,
-                               l1_cloze_model.linear,
-                               l1_cloze_model.l1_dict,
-                               l2_encoder,
-                               gv2i,
-                               l1_key,
-                               l2_key,
+    if l1_cloze_model.train_mode == 0:
+        print('using random l2_init_weights')
+        l2_encoder = make_wl_encoder(g_max_vocab, we_size, None)
+    else:
+        print('using FastText l2_init_weights')
+        l2_init_weights = torch.load(options.l2_init_weights)
+        l2_encoder = make_wl_encoder(None, None, l2_init_weights)
+    cloze_model = L2_MSE_CLOZE(encoder=l1_cloze_model.encoder,
+                               rnn=l1_cloze_model.rnn,
+                               highway_ff=l1_cloze_model.highway_ff,
+                               l1_dict=l1_cloze_model.l1_dict,
+                               l2_encoder=l2_encoder,
+                               l2_dict=gv2i,
+                               l1_key=l1_key,
+                               l2_key=l2_key,
                                iters=options.iters,
-                               loss_type=options.training_loss_type)
-
+                               loss_type=options.training_loss_type,
+                               train_mode=l1_cloze_model.train_mode)
     if options.gpuid > -1:
         cloze_model.init_cuda()
     cloze_model.init_key()
@@ -356,8 +364,8 @@ if __name__ == '__main__':
     #                             cloze_model.encoder.weight.data.clone())
     #_, en_en_neighbors = torch.topk(en_en_sim, 6, 1)
     #cloze_model.en_en_neighbors = en_en_neighbors
-    cloze_model.train()
-
+    cloze_model.eval()
+    print(l1_cloze_model)
     print(cloze_model)
     print('total params', sum([p.numel() for p in cloze_model.parameters()]))
     print('trainable params', sum([p.numel() for p in cloze_model.parameters() if p.requires_grad]))
@@ -375,7 +383,7 @@ if __name__ == '__main__':
     print('beam search completed', time.time() - now)
     print(str(best_state))
     _, all_swapped_types = best_state.swap_counts()
-    print(all_swapped_types)
+    print(all_swapped_types, len(all_swapped_types))
     l1_weights = cloze_model.encoder.weight.data.detach().clone()
     l2_weights = best_state.weights.detach().clone()
     nn, nn_dict = nearest_neighbors(l1_weights, l2_weights,

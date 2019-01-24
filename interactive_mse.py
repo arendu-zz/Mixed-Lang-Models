@@ -89,19 +89,24 @@ if __name__ == '__main__':
     g_max_vocab = len(gv2i)
     l1_cloze_model = torch.load(options.cloze_model, map_location=lambda storage, loc: storage)
     we_size = l1_cloze_model.encoder.weight.size(1)
-    l2_encoder = make_wl_encoder(g_max_vocab, we_size, None)
-
-    cloze_model = L2_MSE_CLOZE(l1_cloze_model.encoder,
-                               l1_cloze_model.rnn,
-                               l1_cloze_model.linear,
-                               l1_cloze_model.l1_dict,
-                               l2_encoder,
-                               gv2i,
-                               l1_key,
-                               l2_key,
+    if l1_cloze_model.train_mode == 0:
+        print('using random l2_init_weights')
+        l2_encoder = make_wl_encoder(g_max_vocab, we_size, None)
+    else:
+        print('using FastText l2_init_weights')
+        l2_init_weights = torch.load(options.l2_init_weights)
+        l2_encoder = make_wl_encoder(None, None, l2_init_weights)
+    cloze_model = L2_MSE_CLOZE(encoder=l1_cloze_model.encoder,
+                               rnn=l1_cloze_model.rnn,
+                               highway_ff=l1_cloze_model.highway_ff,
+                               l1_dict=l1_cloze_model.l1_dict,
+                               l2_encoder=l2_encoder,
+                               l2_dict=gv2i,
+                               l1_key=l1_key,
+                               l2_key=l2_key,
                                iters=options.iters,
-                               loss_type=options.training_loss_type)
-
+                               loss_type=options.training_loss_type,
+                               train_mode=l1_cloze_model.train_mode)
     if options.gpuid > -1:
         cloze_model.init_cuda()
     cloze_model.init_key()
@@ -109,7 +114,7 @@ if __name__ == '__main__':
     #                             cloze_model.encoder.weight.data.clone())
     #_, en_en_neighbors = torch.topk(en_en_sim, 6, 1)
     #cloze_model.en_en_neighbors = en_en_neighbors
-    cloze_model.train()
+    cloze_model.eval()
 
     print(cloze_model)
     print('total params', sum([p.numel() for p in cloze_model.parameters()]))

@@ -2,6 +2,8 @@
 import os
 import pickle
 import argparse
+import fastText
+import torch
 from utils.utils import SPECIAL_TOKENS
 
 def parse_args():
@@ -12,6 +14,7 @@ def parse_args():
                         help="l2 data directory path with parallel_file")
     parser.add_argument('--l2_save_dir', type=str, required=True,
                         help="l2 save dir")
+    parser.add_argument('--wordvec_bin', action='store', dest='word_vec_file', required=True)
     return parser.parse_args()
 
 
@@ -27,10 +30,11 @@ class Preprocess(object):
                               SPECIAL_TOKENS.UNK])
 
 
-    def build(self, l1_data_dir, l2_data_dir, l2_save_dir):
+    def build(self, l1_data_dir, l2_data_dir, l2_save_dir, ft_model):
         l1_vocab = pickle.load(open(os.path.join(l1_data_dir, 'l1.vocab.pkl'), 'rb'))
         l1_idx2v = pickle.load(open(os.path.join(l1_data_dir, 'l1.idx2v.pkl'), 'rb'))
         l1_v2idx = pickle.load(open(os.path.join(l1_data_dir, 'l1.v2idx.pkl'), 'rb'))
+        l1_mat = torch.load(args.l1_data_dir + '/l1.mat.pt')
         #l1_vidx2spelling = pickle.load(open(os.path.join(l1_data_dir, 'l1.vidx2spelling.pkl'), 'rb'))
         #l1_vidx2unigram_prob = pickle.load(open(os.path.join(l1_data_dir, 'l1.vidx2unigram_prob.pkl'), 'rb'))
         #l1_idx2c = pickle.load(open(os.path.join(l1_data_dir, 'l1.idx2c.pkl'), 'rb'))
@@ -69,6 +73,16 @@ class Preprocess(object):
         assert len(l2_v2idx) == len(l2_idx2v)
         pickle.dump(l2_v2idx, open(os.path.join(l2_save_dir, 'l2.v2idx.pkl'), 'wb'))
         pickle.dump(l2_idx2v, open(os.path.join(l2_save_dir, 'l2.idx2v.pkl'), 'wb'))
+
+        mat = torch.FloatTensor(len(l2_idx2v), 300).uniform_(-1.0, 1.0)
+
+        for i, v in l2_idx2v.items():
+            if i < 4:
+                mat[i, :] = l1_mat[i, :]
+            else:
+                v_vec = ft_model.get_word_vector(v)
+                mat[i, :] = torch.tensor(v_vec)
+        torch.save(mat, l2_save_dir + '/l2.mat.pt')
         pickle.dump(full_data_key, open(os.path.join(l2_save_dir, 'l1.l2.key.pkl'), 'wb'))
         pickle.dump(line_keys, open(os.path.join(l2_save_dir, 'per_line.l1.l2.key.pkl'), 'wb'))
         txt_key = open(os.path.join(l2_save_dir, 'full_data_key.txt'), 'w', encoding='utf-8')
@@ -85,6 +99,8 @@ class Preprocess(object):
 if __name__ == '__main__':
     args = parse_args()
     preprocess = Preprocess()
+    ft_model = fastText.load_model(args.word_vec_file)
     preprocess.build(l1_data_dir=args.l1_data_dir,
                      l2_data_dir=args.l2_data_dir,
-                     l2_save_dir=args.l2_save_dir)
+                     l2_save_dir=args.l2_save_dir,
+                     ft_model=ft_model)

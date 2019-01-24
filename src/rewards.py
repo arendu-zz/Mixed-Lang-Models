@@ -54,6 +54,14 @@ def get_nearest_neighbors(l2_embedding, l1_embedding, l2_swap_types, rank_thresh
     return arg_top
 
 
+def get_nearest_neighbors_simple(a_emb, b_emb, r):
+    cs = batch_cosine_sim(a_emb, b_emb)
+    _, arg_top = torch.topk(cs, r, 1, sorted=True)
+    del cs, _
+    return arg_top
+
+
+
 def mrr_score_embeddings(l2_embedding, l1_embedding, l2_key, l1_key, rank_threshold):
     l2_key = l2_key.type_as(l1_embedding).long()
     l1_key = l1_key.type_as(l1_embedding).long()

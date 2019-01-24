@@ -46,6 +46,10 @@ if __name__ == '__main__':
     opt.add_argument('--gpuid', action='store', type=int, dest='gpuid', default=-1)
     opt.add_argument('--epochs', action='store', type=int, dest='epochs', default=50)
     opt.add_argument('--mask_val', action='store', type=float, dest='mask_val', default=0.2)
+    opt.add_argument('--use_orthographic_model', action='store', type=int, dest='use_orthographic_model',
+                     choices=[0, 1, 2], default=0)
+    opt.add_argument('--nn_mat', action='store', type=str, dest='nn_mat')
+    opt.add_argument('--nn_mat_size', action='store', type=int, dest='nn_mat_size', default=20)
     opt.add_argument('--seed', action='store', dest='seed', default=1234, type=int)
     opt.add_argument('--use_early_stop', action='store',
                      dest='use_early_stop', default=1, type=int, choices=set([0, 1]))
@@ -80,12 +84,44 @@ if __name__ == '__main__':
                                 min_batch_size=options.batch_size)
     if options.dev_corpus is not None:
         dev_dataset = TextDataset(options.dev_corpus, v2i, shuffle=False, sort_by_len=True,
-                                  min_batch_size=5000)
+                                  min_batch_size=2000)
+    #if options.use_orthographic_model == 1:
+    #    print('MSE_ORTHOGRAPHIC_CLOZE mode 1')
+    #    cloze_model = MSE_ORTHOGRAPHIC_CLOZE(input_size=emb_dim,
+    #                                         rnn_size=options.model_size,
+    #                                         encoder=l1_encoder,
+    #                                         nn_mapper=None,
+    #                                         l1_dict=v2i,
+    #                                         loss_type=options.loss_type)
+    #elif options.use_orthographic_model == 2:
+    #    print('MSE_ORTHOGRAPHIC_CLOZE mode 2')
+    #    nn_mat = torch.load(options.nn_mat)
+    #    nn_mat = nn_mat[:, :options.nn_mat_size]
+    #    nn_embedding = torch.nn.Embedding(nn_mat.shape[0], nn_mat.shape[1])
+    #    nn_embedding.weight.data = nn_mat
+    #    cloze_model = MSE_ORTHOGRAPHIC_CLOZE(input_size=emb_dim,
+    #                                         rnn_size=options.model_size,
+    #                                         encoder=l1_encoder,
+    #                                         nn_mapper=nn_embedding,
+    #                                         l1_dict=v2i,
+    #                                         loss_type=options.loss_type)
+    #else:
+    if options.use_orthographic_model == 2:
+        nn_mat = torch.load(options.nn_mat)
+        nn_mat = nn_mat[:, :options.nn_mat_size]
+        nn_mapper = torch.nn.Embedding(nn_mat.shape[0], nn_mat.shape[1])
+        nn_mapper.weight.data = nn_mat
+        nn_mapper.requires_grad = False
+    else:
+        nn_mapper = None
     cloze_model = MSE_CLOZE(emb_dim,
                             options.model_size,
                             l1_encoder,
                             v2i,
-                            options.loss_type)
+                            options.loss_type,
+                            options.use_orthographic_model,
+                            nn_mapper=nn_mapper)
+
     if options.gpuid > -1:
         cloze_model.init_cuda()
 
@@ -129,6 +165,7 @@ if __name__ == '__main__':
         dev_accs = []
         assert options.dev_corpus is not None
         cloze_model.eval()
+        print('completed epoch', epoch)
         for batch_idx, batch in enumerate(dev_dataset):
             l, data, text_data = batch
             mask = make_random_mask(data, l, mask_val, v2i[SPECIAL_TOKENS.PAD])
@@ -140,8 +177,9 @@ if __name__ == '__main__':
 
             cuda_batch = l, data, data, ind, mask
             with torch.no_grad():
-                loss, acc = cloze_model(cuda_batch)
-                loss = loss.item()
+                _loss, acc = cloze_model(cuda_batch)
+                loss = _loss.item()
+                del _loss
             dev_losses.append(loss)
             dev_accs.append(acc)
 

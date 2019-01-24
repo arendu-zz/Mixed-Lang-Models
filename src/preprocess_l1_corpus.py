@@ -3,6 +3,7 @@ import os
 import pickle
 import argparse
 import torch
+import fastText
 from utils.utils import SPECIAL_TOKENS
 
 
@@ -10,34 +11,39 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_dir', type=str, required=True,
                         help="data directory path, in this folder a corpus.txt file is expected")
-    parser.add_argument('--wordvecs', action='store', dest='word_vec_file', required=True)
+    parser.add_argument('--wordvec_bin', action='store', dest='word_vec_file', required=True)
     parser.add_argument('--max_word_len', type=int, default=20, help='ignore words longer than this')
     parser.add_argument('--max_vocab', type=int, default=100000, help='only keep most frequent words')
     return parser.parse_args()
 
+
 def load_word_vec(_file, voc2i):
-    wv = {}
-    for l in open(_file, 'r', encoding='utf8').readlines():
-        i = l.strip().split()
-        if len(i) == 301:
-            w = i[0][0].lower() + i[0][1:]
-            v = torch.Tensor([float(f) for f in i[1:]]).unsqueeze(0)
-            if w in voc2i:  # in the vocab list that we have already created
-                if w in wv:  # in the set of vocab that we have seen another form i.e. different capitalization
-                    wv[w] = torch.cat((wv[w], v), dim=0)
-                else:
-                    wv[w] = v
-            else:
-                pass
-    print(len(wv), 'normalized vocab from word_vec_file')
+    ft_model = fastText.load_model(_file)
+    #wv = {}
+    #for l in open(_file, 'r', encoding='utf8').readlines():
+    #    i = l.strip().split()
+    #    if len(i) == 301:
+    #        w = i[0][0].lower() + i[0][1:]
+    #        v = torch.Tensor([float(f) for f in i[1:]]).unsqueeze(0)
+    #        if w in voc2i:  # in the vocab list that we have already created
+    #            if w in wv:  # in the set of vocab that we have seen another form i.e. different capitalization
+    #                wv[w] = torch.cat((wv[w], v), dim=0)
+    #            else:
+    #                wv[w] = v
+    #        else:
+    #            pass
+    #print(len(wv), 'normalized vocab from word_vec_file')
+    #mat = torch.FloatTensor(len(voc2i), 300).uniform_(-1.0, 1.0)
+    #missing = []
+    #for v, i in voc2i.items():
+    #    if v in wv:
+    #        mat[i] = wv[v].mean(dim=0)
+    #    else:
+    #        missing.append(v)
+    #print(len(missing), 'got random vec')
     mat = torch.FloatTensor(len(voc2i), 300).uniform_(-1.0, 1.0)
-    missing = []
     for v, i in voc2i.items():
-        if v in wv:
-            mat[i] = wv[v].mean(dim=0)
-        else:
-            missing.append(v)
-    print(len(missing), 'got random vec')
+        mat[i, :] = torch.tensor(ft_model.get_word_vector(v))
     return mat
 
 
