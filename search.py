@@ -120,14 +120,16 @@ def apply_swap(macaronic_config, model, weights, previous_seen_l2, **kwargs):
     return swap_result
 
 
-def make_start_state(i2v, i2gv, init_weights, model, dl, **kwargs):
+def make_start_state(v2idx, gv2idx, idx2v, idx2gv, init_weights, model, dl, **kwargs):
     macaronic_sentences = []
     for sent_idx, sent in enumerate(dl):
         lens, l1_data, l2_data, l1_text_data, l2_text_data = sent
         swapped = set([])
         not_swapped = set([])
         #swappable = set([i for i in range(1, l1_data[0, :].size(0) - 1)])
-        swappable = set([idx for idx, i in enumerate(l2_data[0, :]) if i != gv2i[SPECIAL_TOKENS.UNK]][1:-1])
+        swappable = set([idx for idx, _ in enumerate(l2_data[0, :]) if
+                        (l2_data[0, idx].item() != gv2idx[SPECIAL_TOKENS.UNK] and
+                         l1_data[0, idx].item() != v2idx[SPECIAL_TOKENS.UNK])][1:-1])
         l1_tokens = [SPECIAL_TOKENS.BOS] + l1_text_data[0].strip().split() + [SPECIAL_TOKENS.EOS] # [i2v[i.item()] for i in l1_data[0, :]]
         l2_tokens = [SPECIAL_TOKENS.BOS] + l2_text_data[0].strip().split() + [SPECIAL_TOKENS.EOS] # [i2gv[i.item()] for i in l2_data[0, :]]
         ms = MacaronicSentence(l1_tokens, l2_tokens,
@@ -305,7 +307,7 @@ if __name__ == '__main__':
     weights = cloze_model.get_weight()
     init_weights = weights.clone()
     kwargs = vars(options)
-    start_state = make_start_state(i2v, i2gv, init_weights, cloze_model, dataset, **kwargs)
+    start_state = make_start_state(v2i, gv2i, i2v, i2gv, init_weights, cloze_model, dataset, **kwargs)
     now = time.time()
     best_state = beam_search_per_sentence(cloze_model, start_state, **kwargs)
     #best_state = beam_search(cloze_model, start_state, **kwargs)

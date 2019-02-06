@@ -1,10 +1,12 @@
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import os
 import pickle
 import argparse
 import fastText
 import torch
-from utils.utils import SPECIAL_TOKENS
+from src.utils.utils import SPECIAL_TOKENS
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -34,7 +36,7 @@ class Preprocess(object):
         l1_vocab = pickle.load(open(os.path.join(l1_data_dir, 'l1.vocab.pkl'), 'rb'))
         l1_idx2v = pickle.load(open(os.path.join(l1_data_dir, 'l1.idx2v.pkl'), 'rb'))
         l1_v2idx = pickle.load(open(os.path.join(l1_data_dir, 'l1.v2idx.pkl'), 'rb'))
-        l1_mat = torch.load(args.l1_data_dir + '/l1.mat.pt')
+        l1_mat = torch.load(l1_data_dir + '/l1.mat.pt')
         #l1_vidx2spelling = pickle.load(open(os.path.join(l1_data_dir, 'l1.vidx2spelling.pkl'), 'rb'))
         #l1_vidx2unigram_prob = pickle.load(open(os.path.join(l1_data_dir, 'l1.vidx2unigram_prob.pkl'), 'rb'))
         #l1_idx2c = pickle.load(open(os.path.join(l1_data_dir, 'l1.idx2c.pkl'), 'rb'))
@@ -93,7 +95,7 @@ class Preprocess(object):
         info = open(os.path.join(l2_save_dir, 'INFO.FILE'), 'w')
         info.write("the l2*pkl files and l1.l2.key.pkl file was created using the l1 vocabulary from:" + l1_data_dir)
         info.close()
-        return True
+        return l2_v2idx
 
 
 if __name__ == '__main__':

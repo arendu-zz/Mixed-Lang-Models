@@ -13,6 +13,10 @@ from src.opt.noam import NoamOpt
 from src.rewards import score_embeddings
 from src.rewards import rank_score_embeddings
 
+from .transformer_encoder_layer import TransformerEncoderLayer
+
+import pdb
+
 
 def get_unsort_idx(sort_idx):
     unsort_idx = torch.zeros_like(sort_idx).long().scatter_(0, sort_idx, torch.arange(sort_idx.size(0)).long())
@@ -59,6 +63,65 @@ def make_wl_decoder(encoder):
     decoder.weight = encoder.weight
     #torch.nn.init.xavier_uniform_(decoder.weight)
     return decoder
+
+def make_context_encoder(context_encoder_type, input_size, hidden_size, pad_token_id):
+    if context_encoder_type == 'RNN':
+        return BiRNNConextEncoder(input_size, hidden_size)
+    elif context_encoder_type == 'Attention':
+        return SelfAttentionalContextEncoder(input_size, hidden_size, pad_token_id,
+                                             dropout_val=0.3, max_positional_embeddings=500)
+
+
+class BiRNNConextEncoder(nn.Module):
+    def __init__(self, input_size, hidden_size):
+        super(BiRNNConextEncoder, self).__init__()
+        self.rnn = nn.LSTM(input_size,
+                           hidden_size,
+                           num_layers=1,
+                           batch_first=True,
+                           bidirectional=True)
+        self.hidden_size = hidden_size
+        self.z = torch.zeros(1, 1, self.hidden_size, requires_grad=False)
+        self.output_size = 2 * self.hidden_size
+
+    def forward(self, l1_data, encoded, lengths):
+        batch_size, seq_len = l1_data.shape
+        packed_encoded = pack(encoded, lengths, batch_first=True)
+        # encoded = (batch_size x seq_len x embedding_size)
+        packed_hidden, (h_t, c_t) = self.rnn(packed_encoded)
+        hidden, lengths = unpack(packed_hidden, batch_first=True)
+        z = self.z.expand(batch_size, 1, self.hidden_size)
+        fwd_hidden = torch.cat((z, hidden[:, :-1, :self.hidden_size]), dim=1)
+        bwd_hidden = torch.cat((hidden[:, 1:, self.hidden_size:], z), dim=1)
+        # bwd_hidden = (batch_size x seq_len x hidden_size)
+        # fwd_hidden = (batch_size x seq_len x hidden_size)
+        hidden = torch.cat((fwd_hidden, bwd_hidden), dim=2)
+        return hidden
+
+
+class SelfAttentionalContextEncoder(nn.Module):
+    def __init__(self, input_size, hidden_size, pad_token_id, dropout_val=0.3, max_positional_embeddings=500):
+        super(SelfAttentionalContextEncoder, self).__init__()
+        self.hidden_size = hidden_size
+        self.positional_embeddings = SinusoidalPositionalEncoding(max_positional_embeddings, input_size)
+        self.self_attention = TransformerEncoderLayer(input_size, hidden_size, 1, dropout_val)
+        self.pad_token_id = pad_token_id
+        self.output_size = input_size
+
+    def forward(self, data, encoded, lengths):
+        batch_size, seq_len = data.shape
+        pos_encoded = self.positional_embeddings(data)
+        diag_mask = data.eq(self.pad_token_id) #self.l1_dict[SPECIAL_TOKENS.PAD])
+        d = torch.arange(1, seq_len)
+        diag_mask = diag_mask.unsqueeze(1).repeat(1, seq_len, 1)
+        #print(d)
+        #print(l1_data.shape)
+        #print(diag_mask)
+        diag_mask[:, d, d] = 1
+        hiddens, attn_probs = self.self_attention(encoded + pos_encoded, diag_mask)  # all the transformer magic
+        return hiddens
+
+
 
 
 class VarLinear(nn.Module):
@@ -234,3 +297,23 @@ class MapEmbedding(nn.Module):
         elif x.dim() == 1:
             return l2_weights[x]
 
+
+
+class SinusoidalPositionalEncoding(nn.Module):
+    "Implement the PE function."
+    def __init__(self, max_len, embed_size):
+        super(SinusoidalPositionalEncoding, self).__init__()
+        # Compute the positional encodings once in log space.
+        pe = torch.zeros(max_len, embed_size)
+        position = torch.arange(max_len).unsqueeze(1).float()
+        div_term = torch.exp(torch.arange(0, embed_size, 2).float() *
+                             -(math.log(10000.0) / embed_size)).unsqueeze(0).float()
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.pe = nn.Embedding(max_len, embed_size)
+        self.pe.weight.data = pe
+        self.pe.weight.requires_grad = False
+
+    def forward(self, x):
+        pos = torch.arange(x.shape[1]).expand_as(x).type_as(x)
+        return self.pe(pos)

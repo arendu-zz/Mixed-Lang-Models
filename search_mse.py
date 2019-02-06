@@ -150,7 +150,7 @@ def apply_swap(macaronic_config, model, weights, previous_seen_l2, **kwargs):
     return swap_result
 
 
-def make_start_state(i2v, i2gv, init_weights, model, dl, **kwargs):
+def make_start_state(v2idx, gv2idx, idx2v, idx2gv, init_weights, model, dl, **kwargs):
     pkl_list = pickle.load(open(kwargs['per_line_key'], 'rb'))
     per_line_key = []
     for pkl in pkl_list:
@@ -162,7 +162,9 @@ def make_start_state(i2v, i2gv, init_weights, model, dl, **kwargs):
         lens, l1_data, l2_data, l1_text_data, l2_text_data = sent
         swapped = set([])
         not_swapped = set([])
-        swappable = set([idx for idx, i in enumerate(l2_data[0, :]) if i != gv2i[SPECIAL_TOKENS.UNK]][1:-1])
+        swappable = set([idx for idx, _ in enumerate(l2_data[0, :]) if
+                        (l2_data[0, idx].item() != gv2idx[SPECIAL_TOKENS.UNK] and
+                         l1_data[0, idx].item() != v2idx[SPECIAL_TOKENS.UNK])][1:-1])
         l1_tokens = [SPECIAL_TOKENS.BOS] + l1_text_data[0].strip().split() + [SPECIAL_TOKENS.EOS] # [i2v[i.item()] for i in l1_data[0, :]]
         l2_tokens = [SPECIAL_TOKENS.BOS] + l2_text_data[0].strip().split() + [SPECIAL_TOKENS.EOS] # [i2gv[i.item()] for i in l2_data[0, :]]
         ms = MacaronicSentence(l1_tokens, l2_tokens,
@@ -235,7 +237,7 @@ def beam_search_per_sentence(search_file, guesses_file, json_file, model, init_s
                 guesses_file.write('sent:' + str(sent_idx) + '\n')
                 guesses_file.write(nn)
                 guesses_file.flush()
-            print('')
+            #print('')
             q.append(init_next_sentence_state)
             sent_idx += 1
     search_result = json.dumps(search_result, ensure_ascii=False)#.encode('utf8')
@@ -339,7 +341,7 @@ if __name__ == '__main__':
     g_max_vocab = len(gv2i)
     l1_cloze_model = torch.load(options.cloze_model, map_location=lambda storage, loc: storage)
     we_size = l1_cloze_model.encoder.weight.size(1)
-    if l1_cloze_model.train_mode == 0:
+    if l1_cloze_model.ortho_mode == 0:
         print('using random l2_init_weights')
         l2_encoder = make_wl_encoder(g_max_vocab, we_size, None)
     else:
@@ -347,7 +349,7 @@ if __name__ == '__main__':
         l2_init_weights = torch.load(options.l2_init_weights)
         l2_encoder = make_wl_encoder(None, None, l2_init_weights)
     cloze_model = L2_MSE_CLOZE(encoder=l1_cloze_model.encoder,
-                               rnn=l1_cloze_model.rnn,
+                               context_encoder=l1_cloze_model.context_encoder,
                                highway_ff=l1_cloze_model.highway_ff,
                                l1_dict=l1_cloze_model.l1_dict,
                                l2_encoder=l2_encoder,
@@ -356,7 +358,7 @@ if __name__ == '__main__':
                                l2_key=l2_key,
                                iters=options.iters,
                                loss_type=options.training_loss_type,
-                               train_mode=l1_cloze_model.train_mode)
+                               ortho_mode=l1_cloze_model.ortho_mode)
     if options.gpuid > -1:
         cloze_model.init_cuda()
     cloze_model.init_key()
@@ -373,7 +375,8 @@ if __name__ == '__main__':
     weights = cloze_model.get_weight()
     init_weights = weights.clone()
     kwargs = vars(options)
-    start_state = make_start_state(i2v, i2gv, init_weights, cloze_model, dataset, **kwargs)
+    pdb.set_trace()
+    start_state = make_start_state(v2i, gv2i, i2v, i2gv, init_weights, cloze_model, dataset, **kwargs)
     now = time.time()
     best_state = beam_search_per_sentence(search_output,
                                           search_output_guesses,

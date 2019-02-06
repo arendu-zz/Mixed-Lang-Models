@@ -13,7 +13,7 @@ from src.opt.noam import NoamOpt
 from src.rewards import score_embeddings
 from src.rewards import rank_score_embeddings
 
-
+from .model_untils import SinusoidalPositionalEncoding
 from .transformer_encoder_layer import TransformerEncoderLayer
 
 
@@ -63,26 +63,6 @@ def make_wl_decoder(encoder):
     #torch.nn.init.xavier_uniform_(decoder.weight)
     return decoder
 
-
-class SinusoidalPositionalEncoding(nn.Module):
-    "Implement the PE function."
-    def __init__(self, max_len, embed_size):
-        super(SinusoidalPositionalEncoding, self).__init__()
-        # Compute the positional encodings once in log space.
-        pe = torch.zeros(max_len, embed_size)
-        position = torch.arange(max_len).unsqueeze(1).float()
-        div_term = torch.exp(torch.arange(0, embed_size, 2).float() *
-                             -(math.log(10000.0) / embed_size)).unsqueeze(0).float()
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        self.pe = nn.Embedding(max_len, embed_size)
-        self.pe.weight.data = pe
-        self.pe.weight.requires_grad = False
-
-    def forward(self, x):
-        print(x.shape)
-        pos = torch.arange(x.shape[1]).expand_as(x).type_as(x)
-        return self.pe(pos)
 
 
 class WordRepresenter(nn.Module):

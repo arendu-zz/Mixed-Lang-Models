@@ -4,7 +4,7 @@ import pickle
 import argparse
 import torch
 import fastText
-from utils.utils import SPECIAL_TOKENS
+from ..utils.utils import SPECIAL_TOKENS
 
 
 def parse_args():

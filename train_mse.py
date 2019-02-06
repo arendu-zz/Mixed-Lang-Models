@@ -11,8 +11,7 @@ from src.utils.utils import SPECIAL_TOKENS
 from src.utils.utils import TextDataset
 
 from src.models.mse_model import MSE_CLOZE
-import pdb
-
+from src.models.model_untils import make_context_encoder
 
 def make_random_mask(data, lengths, mask_val, pad_idx):
     drop_num = int(lengths[-1] * mask_val)
@@ -40,14 +39,19 @@ if __name__ == '__main__':
     opt.add_argument('--c2i', action='store', dest='c2i', required=True,
                      help='character (corpus and gloss)  to index pickle obj')
     opt.add_argument('--model_size', action='store', type=int, dest='model_size', default=250)
+    opt.add_argument('--context_encoder_type', action='store', type=str, dest='context_encoder_type',
+                     required=True, choices=['RNN', 'Attention'])
     opt.add_argument('--batch_size', action='store', type=int, dest='batch_size', default=20)
     opt.add_argument('--loss_type', action='store', type=str,
                      choices=['cs', 'cs_margin', 'mse', 'huber'], required=True)
     opt.add_argument('--gpuid', action='store', type=int, dest='gpuid', default=-1)
     opt.add_argument('--epochs', action='store', type=int, dest='epochs', default=50)
     opt.add_argument('--mask_val', action='store', type=float, dest='mask_val', default=0.2)
+    opt.add_argument('--use_rand_hiddens', action='store', type=int, dest='use_rand_hiddens',
+                     choices=[0, 1], default=0)
     opt.add_argument('--use_orthographic_model', action='store', type=int, dest='use_orthographic_model',
-                     choices=[0, 1, 2], default=0)
+                     choices=[0, 1, 2, 3, 4], default=0)
+    opt.add_argument('--num_highways', action='store', type=int, dest='num_highways', default=1)
     opt.add_argument('--nn_mat', action='store', type=str, dest='nn_mat')
     opt.add_argument('--nn_mat_size', action='store', type=int, dest='nn_mat_size', default=20)
     opt.add_argument('--seed', action='store', dest='seed', default=1234, type=int)
@@ -106,7 +110,7 @@ if __name__ == '__main__':
     #                                         l1_dict=v2i,
     #                                         loss_type=options.loss_type)
     #else:
-    if options.use_orthographic_model == 2:
+    if options.use_orthographic_model == 3 or options.use_orthographic_model == 4:
         nn_mat = torch.load(options.nn_mat)
         nn_mat = nn_mat[:, :options.nn_mat_size]
         nn_mapper = torch.nn.Embedding(nn_mat.shape[0], nn_mat.shape[1])
@@ -114,13 +118,16 @@ if __name__ == '__main__':
         nn_mapper.requires_grad = False
     else:
         nn_mapper = None
+    context_encoder = make_context_encoder(options.context_encoder_type, emb_dim, options.model_size, v2i[SPECIAL_TOKENS.PAD])
     cloze_model = MSE_CLOZE(emb_dim,
-                            options.model_size,
                             l1_encoder,
+                            context_encoder,
                             v2i,
                             options.loss_type,
                             options.use_orthographic_model,
-                            nn_mapper=nn_mapper)
+                            options.use_rand_hiddens,
+                            nn_mapper=nn_mapper,
+                            num_highways=options.num_highways)
 
     if options.gpuid > -1:
         cloze_model.init_cuda()
