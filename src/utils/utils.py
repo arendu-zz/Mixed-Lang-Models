@@ -2,6 +2,7 @@
 __author__ = 'arenduchintala'
 import random
 import torch
+import pdb
 
 
 class SPECIAL_TOKENS:
@@ -16,27 +17,14 @@ class SPECIAL_TOKENS:
     NULL = '<null>'
 
 
-class TEXT_EFFECT:
-    PURPLE = '\033[95m'
-    CYAN = '\033[96m'
-    DARKCYAN = '\033[36m'
-    BLUE = '\033[94m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    RED = '\033[91m'
-    BOLD = '\033[1m'
-    UNDERLINE = '\033[4m'
-    END = '\033[0m'
-
-
 class LazyTextBatcher(object):
     def __init__(self,
                  file_name,
                  shuffle,
                  sort_by_len,
-                 min_batch_size,
+                 min_batch_size=1000,
                  min_batch_by_num_tokens=True,
-                 max_batch_size=100000):
+                 max_batch_size=10000):
         assert max_batch_size >= min_batch_size
         self.file_name = file_name
         self.shuffle = shuffle
@@ -112,6 +100,13 @@ class TextDataset(object):
         # for _ in self.lazy_batcher:
         #    self.num_batches += 1
 
+    def get_adv(self, i):
+        _i = i.split('|')
+        if len(_i) == 2:
+            return _i[0], _i[1]
+        else:
+            return _i[0], SPECIAL_TOKENS.PAD
+
     def set_mask_rate(self, p):
         self.p = p
 
@@ -119,53 +114,20 @@ class TextDataset(object):
         for min_batch in self.lazy_batcher:
             lengths, l1_text_data, l2_text_data = zip(*min_batch)
             l1_text_data = list(l1_text_data)
-            lengths = [i + 2 for i in lengths]
-            torch_data = torch.zeros(len(l1_text_data), lengths[0]).long()
+            lengths = [i + 1 for i in lengths]
+            torch_inps = torch.zeros(len(l1_text_data), lengths[0]).long()
+            torch_targets = torch.zeros(len(l1_text_data), lengths[0]).long()
+            torch_adv_targets = torch.zeros(len(l1_text_data), lengths[0]).long()
             for _idx, l in enumerate(lengths): # range(len(lengths)):
                 if self.lower_text:
-                    _tmp = [self.v2idx.get(i.lower(), self.v2idx[SPECIAL_TOKENS.UNK]) for i in
+                    _tmp = [self.v2idx.get(self.get_adv(i)[0].lower(), self.v2idx[SPECIAL_TOKENS.UNK]) for i in
                             [SPECIAL_TOKENS.BOS] + l1_text_data[_idx].split() + [SPECIAL_TOKENS.EOS]]
                 else:
-                    _tmp = [self.v2idx.get(i, self.v2idx[SPECIAL_TOKENS.UNK]) for i in
+                    _tmp = [self.v2idx.get(self.get_adv(i)[0], self.v2idx[SPECIAL_TOKENS.UNK]) for i in
                             [SPECIAL_TOKENS.BOS] + l1_text_data[_idx].split() + [SPECIAL_TOKENS.EOS]]
-                torch_data[_idx, :lengths[_idx]] = torch.LongTensor(_tmp)
-            yield lengths, torch_data, l1_text_data
-
-
-class ParallelTextDataset(object):
-    def __init__(self,
-                 corpus_file,
-                 l1_v2idx,
-                 l2_v2idx,
-                 lower_text=True):
-        self.l1_v2idx = l1_v2idx
-        self.l2_v2idx = l2_v2idx
-        assert self.l1_v2idx[SPECIAL_TOKENS.PAD] == 0
-        assert self.l2_v2idx[SPECIAL_TOKENS.PAD] == 0
-        self.lower_text = lower_text
-        self.lazy_batcher = LazyTextBatcher(corpus_file, False, False, 1, min_batch_by_num_tokens=False)
-
-    def __iter__(self,):
-        for min_batch in self.lazy_batcher:
-            lengths, l1_text_data, l2_text_data = zip(*min_batch)
-            lengths = [i + 2 for i in lengths]
-            l1_text_data = list(l1_text_data)
-            l2_text_data = list(l2_text_data)
-            l1_torch_data = torch.zeros(len(l1_text_data), lengths[0]).long()
-            l2_torch_data = torch.zeros(len(l2_text_data), lengths[0]).long()
-            for _idx, l in enumerate(lengths):  # range(len(lengths)):
-                if self.lower_text:
-                    _tmp = [self.l1_v2idx.get(i.lower(), self.l1_v2idx[SPECIAL_TOKENS.UNK]) for i in
+                _adv_tmp = [self.v2idx.get(self.get_adv(i)[1], self.v2idx[SPECIAL_TOKENS.UNK]) for i in
                             [SPECIAL_TOKENS.BOS] + l1_text_data[_idx].split() + [SPECIAL_TOKENS.EOS]]
-                else:
-                    _tmp = [self.l1_v2idx.get(i, self.l1_v2idx[SPECIAL_TOKENS.UNK]) for i in
-                            [SPECIAL_TOKENS.BOS] + l1_text_data[_idx].split() + [SPECIAL_TOKENS.EOS]]
-                l1_torch_data[_idx, :lengths[_idx]] = torch.LongTensor(_tmp)
-                if self.lower_text:
-                    _tmp = [self.l2_v2idx.get(i.lower(), self.l2_v2idx[SPECIAL_TOKENS.UNK]) for i in
-                            [SPECIAL_TOKENS.BOS] + l2_text_data[_idx].split() + [SPECIAL_TOKENS.EOS]]
-                else:
-                    _tmp = [self.l2_v2idx.get(i, self.l2_v2idx[SPECIAL_TOKENS.UNK]) for i in
-                            [SPECIAL_TOKENS.BOS] + l2_text_data[_idx].split() + [SPECIAL_TOKENS.EOS]]
-                l2_torch_data[_idx, :lengths[_idx]] = torch.LongTensor(_tmp)
-            yield lengths, l1_torch_data, l2_torch_data, l1_text_data, l2_text_data
+                torch_inps[_idx, :lengths[_idx]] = torch.LongTensor(_tmp[:-1])
+                torch_targets[_idx, :lengths[_idx]] = torch.LongTensor(_tmp[1:])
+                torch_adv_targets[_idx, :lengths[_idx]] = torch.LongTensor(_adv_tmp[1:])
+            yield lengths, torch_inps, torch_targets, l1_text_data, torch_adv_targets

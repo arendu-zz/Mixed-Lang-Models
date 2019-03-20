@@ -74,6 +74,7 @@ class Preprocess(object):
         print("building vocab...", corpus_file)
         line_num = 0
         self.wc = {}
+        self.adv_labels = set([])
         total_words = 0
         with open(corpus_file, 'r', encoding='utf-8') as f:
             for line in f:
@@ -83,6 +84,8 @@ class Preprocess(object):
                 words = line.strip().split()
                 assert len(words) > 0
                 for word in words:
+                    _word = word.split('|')
+                    word = _word[0]
                     word = word.lower()
                     if word in self.spl_words:
                         pass
@@ -91,9 +94,12 @@ class Preprocess(object):
                         total_words += 1
                     else:
                         pass
+                    if len(_word) == 2:
+                        adv_label = _word[1].strip()
+                        self.adv_labels.add(adv_label.strip())
         print("")
         print("total word types", len(self.wc))
-        self.vocab = [SPECIAL_TOKENS.PAD, SPECIAL_TOKENS.BOS, SPECIAL_TOKENS.EOS, SPECIAL_TOKENS.UNK] + \
+        self.vocab = [SPECIAL_TOKENS.PAD, SPECIAL_TOKENS.BOS, SPECIAL_TOKENS.EOS, SPECIAL_TOKENS.UNK] + list(self.adv_labels) + \
             sorted(self.wc, key=self.wc.get, reverse=True)[:max_vocab]  # all word types frequency sorted
         print("word types", len(self.vocab))
         total_count = sum([self.wc.get(v, 0) for v in self.vocab])
@@ -130,6 +136,7 @@ class Preprocess(object):
         print('vocab size', len(self.vocab))
         pickle.dump(self.vocab, open(os.path.join(data_dir, 'l1.vocab.pkl'), 'wb'))
         pickle.dump(idx2v, open(os.path.join(data_dir, 'l1.idx2v.pkl'), 'wb'))
+        pickle.dump(self.adv_labels, open(os.path.join(data_dir, 'adv_labels.pkl'), 'wb'))
         print('v2idx size', len(v2idx))
         assert len(idx2v) == len(v2idx) == len(vidx2spelling)
         pickle.dump(v2idx, open(os.path.join(data_dir, 'l1.v2idx.pkl'), 'wb'))
@@ -153,4 +160,4 @@ if __name__ == '__main__':
                              max_word_len=args.max_word_len,
                              max_vocab=args.max_vocab)
     embedding = load_word_vec(args.word_vec_file, v2idx)
-    torch.save(embedding, os.path.join(args.data_dir, 'l1.mat.pt')) 
+    torch.save(embedding, os.path.join(args.data_dir, 'l1.mat.pt'))
