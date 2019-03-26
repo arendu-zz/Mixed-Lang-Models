@@ -84,8 +84,8 @@ class BiRNNConextEncoder(nn.Module):
         self.z = torch.zeros(1, 1, self.hidden_size, requires_grad=False)
         self.output_size = 2 * self.hidden_size
 
-    def forward(self, l1_data, encoded, lengths):
-        batch_size, seq_len = l1_data.shape
+    def forward(self, encoded, lengths):
+        batch_size = encoded.size(0)
         packed_encoded = pack(encoded, lengths, batch_first=True)
         # encoded = (batch_size x seq_len x embedding_size)
         packed_hidden, (h_t, c_t) = self.rnn(packed_encoded)
