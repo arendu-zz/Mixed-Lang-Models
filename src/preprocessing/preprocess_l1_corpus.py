@@ -5,6 +5,7 @@ import argparse
 import torch
 import fastText
 from ..utils.utils import SPECIAL_TOKENS
+from src.rewards import get_nearest_neighbors_simple
 
 
 def parse_args():
@@ -51,6 +52,8 @@ def to_str(lst):
     return ','.join([str(i) for i in lst])
 
 
+
+
 class Preprocess(object):
     def __init__(self,):
         # spl sym for words
@@ -81,7 +84,7 @@ class Preprocess(object):
                 if not line_num % 1000:
                     print("working on {}kth line".format(line_num // 1000))
                 words = line.strip().split()
-                assert len(words) > 0
+                assert len(words) > 0, str(line_num) + ' is empty'
                 for word in words:
                     word = word.lower()
                     if word in self.spl_words:
@@ -153,4 +156,4 @@ if __name__ == '__main__':
                              max_word_len=args.max_word_len,
                              max_vocab=args.max_vocab)
     embedding = load_word_vec(args.word_vec_file, v2idx)
-    torch.save(embedding, os.path.join(args.data_dir, 'l1.mat.pt')) 
+    torch.save(embedding, os.path.join(args.data_dir, 'l1.mat.pt'))

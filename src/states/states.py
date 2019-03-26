@@ -6,6 +6,7 @@ import json
 
 from src.utils.utils import TEXT_EFFECT
 
+
 NEXT_SENT = (-1, None)
 
 
@@ -157,6 +158,7 @@ class MacaronicState(object):
 
             #c.score = c.start_score + (swap_result['score'] - (kwargs['penalty'] * swap_type_count))
             #c.score = c.start_score + swap_result['score']
+            c.model.update_l2_exposure(current_displayed_config.l2_swapped_types)
             c.score = swap_result['score']
             if c.displayed_sentence_idx + 1 < len(c.macaronic_sentences):
                 c.displayed_sentence_idx = self.displayed_sentence_idx + 1
@@ -193,7 +195,6 @@ class MacaronicState(object):
                 c.score = self.score
                 c.swap_token_counts = self.swap_token_counts
             next_state = c
-        #print(next_state)
         return next_state
 
 
@@ -307,7 +308,7 @@ class MacaronicSentence(object):
         elif w_idx in self.not_swapped:
             return TEXT_EFFECT.YELLOW + w1 + TEXT_EFFECT.END
         else:
-            return TEXT_EFFECT.YELLOW + w1 + TEXT_EFFECT.END
+            return w1 #TEXT_EFFECT.YELLOW + w1 + TEXT_EFFECT.END
 
     def to_obj_list(self):
         j = []

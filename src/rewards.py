@@ -49,9 +49,9 @@ def score_embeddings(l2_embedding, l1_embedding, l2_key, l1_key, l2_swap_types=N
 def get_nearest_neighbors(l2_embedding, l1_embedding, l2_swap_types, rank_threshold):
     l2_types = torch.Tensor(list(l2_swap_types)).type_as(l1_embedding).long()
     cs = batch_cosine_sim(l2_embedding[l2_types], l1_embedding)
-    _, arg_top = torch.topk(cs, rank_threshold, 1, sorted=True)
-    del cs, _
-    return arg_top
+    cs_top, arg_top = torch.topk(cs, rank_threshold, 1, sorted=True)
+    del cs
+    return arg_top, cs_top
 
 
 def get_nearest_neighbors_simple(a_emb, b_emb, r):

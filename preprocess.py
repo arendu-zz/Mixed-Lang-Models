@@ -7,7 +7,7 @@ import pickle
 from src.preprocessing.preprocess_l1_corpus import Preprocess as Preprocess_L1
 from src.preprocessing.preprocess_l2_corpus import Preprocess as Preprocess_L2
 from src.preprocessing.preprocess_l1_corpus import load_word_vec
-from src.preprocessing.get_nn import save_nn_mat
+from src.preprocessing.dump_nn import save_nn_mat
 import torch
 import editdistance
 

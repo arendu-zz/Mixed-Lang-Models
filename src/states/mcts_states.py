@@ -3,22 +3,21 @@ __author__ = 'arenduchintala'
 import numpy as np
 import time
 import random
-
 EPS = 1e-4
 
 
 class SearchTree(object):
-    def __init__(self, game, backup_type, rollout_func, rollout_params, state_update_func):
+    def __init__(self, game, mcts_params, rollout_func, rollout_params, state_update_func):
         self.game = game
         self.rollout_func = rollout_func
         self.rollout_params = rollout_params
         self.state_update_func = state_update_func
-        self.iters = 20
+        self.iters = mcts_params['mcts_iters']
         self.nodes_seen = {}
-        self.gamma = 1.0
-        self.backup_type = backup_type
-        self.C = 0.01
-        self.D = 10.
+        self.gamma = mcts_params.get('gamma', 1.0)
+        self.backup_type = mcts_params['backup_type']
+        self.C = mcts_params.get('const_C', 0.01)
+        self.D = mcts_params.get('const_D', 10.0)
         self.consecutive_action_threshold = 1
 
     def recursive_search(self, root_node):
@@ -38,6 +37,8 @@ class SearchTree(object):
             print('======root node=====\n', root_node)
             if root_node.completed_expansion:
                 _c, _v, _u, _vt, _a, _vis = self.display_child_values(root_node, self.C)
+            else:
+                print('not completed_expansion')
                 #rank = tuple(np.array(_vis).argsort().argsort().tolist())
                 #if rank == prev_rank:
                 #    same_rank += 1
@@ -54,7 +55,7 @@ class SearchTree(object):
             #        return best_node
 
             node, search_sequence = self.selection(root_node)
-            #print('===selection node===\n', node)
+            print('===selection node===\n', node)
             if not node.state.terminal:
                 node, search_sequence = self.expansion(node, search_sequence)
                 print('===expansion node===\n', node)
@@ -73,8 +74,10 @@ class SearchTree(object):
         search_sequence = [node]
         while node.completed_expansion:
             assert not node.state.terminal
-            action, node = self.select_child(node, self.C)
-            search_sequence.append(node)
+            action, child_node = self.select_child(node, self.C)
+            assert child_node != node
+            search_sequence.append(child_node)
+            node = child_node
         return node, search_sequence
 
     def expansion(self, node, search_sequence):
@@ -91,6 +94,9 @@ class SearchTree(object):
         rollout_start_state.binary_branching = self.rollout_params['rollout_binary_branching']
         state = self.rollout_func(rollout_start_state, **self.rollout_params)
         print('rollout time', time.time() - now)
+        if rollout_start_state.score == float('-inf'):
+            state.score = 0.0
+            print('forcing score to 0.0 because rollout_start_state is bad')
         return state
 
     def backup(self, reward, winner, search_sequence):
@@ -165,6 +171,7 @@ class SearchTree(object):
             expanded_node = self.nodes_seen[str(new_state)]
         else:
             expanded_node = SearchNode(new_state, new_state_unexpanded_actions, new_state_expanded_actions)
+            assert expanded_node != node
             self.nodes_seen[str(new_state)] = expanded_node
 
         node.update_expansion(action, expanded_node)
@@ -191,7 +198,6 @@ class SearchNode(object):
         self.value = [EPS]
         self.prev_value = [EPS]
         self.prod_std_deviation = [1.0]
-
 
     def update_expansion(self, action, child_node):
         assert action not in self.expanded_actions

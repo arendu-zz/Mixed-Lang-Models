@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-import pdb
 import argparse
 import numpy as np
 from operator import attrgetter
@@ -58,13 +57,14 @@ def nearest_neighbors(l1_weights, l2_weights, l2, l1_dict_idx, l2_dict_idx, rank
     nn = []
     nn_dict = {}
     if len(l2) > 0:
-        arg_top_seen = get_nearest_neighbors(l2_weights,
-                                             l1_weights,
-                                             l2, rank_threshold)
+        arg_top_seen, cs_top_seen = get_nearest_neighbors(l2_weights,
+                                                          l1_weights,
+                                                          l2, rank_threshold)
         assert arg_top_seen.shape[0] == len(l2)
         for idx, l2_idx in enumerate(list(l2)):
             nn.append(' '.join([str(l2_idx).ljust(3), l2_dict_idx[l2_idx].ljust(15), ':'] +
-                               [l1_dict_idx[i] for i in arg_top_seen[idx].tolist()]))
+                               ['{0:.2f}'.format(cs_top_seen[idx, j].item()) + ' ' + l1_dict_idx[i].ljust(5) for j, i
+                                in enumerate(arg_top_seen[idx].tolist())]))
             nn_dict[l2_idx] = [l1_dict_idx[i] for i in arg_top_seen[idx].tolist()]
     nn = '\n'.join(nn).strip()
     return nn, nn_dict
@@ -217,9 +217,9 @@ def beam_search_per_sentence(search_file, guesses_file, json_file, model, init_s
             macaronic_sentence = best_state.macaronic_sentences[best_state.displayed_sentence_idx]
             print(sent_idx)
             print(macaronic_sentence)
-            if search_output is not None:
-                search_output.write(str(macaronic_sentence) + '\n')
-                search_output.flush()
+            if search_file is not None:
+                search_file.write(str(macaronic_sentence) + '\n')
+                search_file.flush()
             l2 = macaronic_sentence.l2_swapped_types
             obj_list = macaronic_sentence.to_obj_list()
             actions, action_weights = best_state.possible_actions()
@@ -246,7 +246,7 @@ def beam_search_per_sentence(search_file, guesses_file, json_file, model, init_s
     return best_state
 
 
-def beam_search(model, init_state, **kwargs):
+def beam_search(init_state, **kwargs):
     beam_size = kwargs['beam_size']
     best_state = init_state
     q = PriorityQ(beam_size)
@@ -254,9 +254,9 @@ def beam_search(model, init_state, **kwargs):
     while q.length() > 0:
         curr_state = q.pop(kwargs['stochastic'] == 1)
         if 'verbose' in kwargs and kwargs['verbose']:
-            #print('curr_state\n', str(curr_state))
+            print('curr_state\n', str(curr_state))
             pass
-        if curr_state.score >= best_state.score and curr_state.terminal:
+        if curr_state.score >= best_state.score: #and curr_state.terminal:
             best_state = curr_state
         actions, action_weights = curr_state.possible_actions()
         for action in actions:  # sorted(zip(action_weights, actions), reverse=True):
@@ -296,8 +296,8 @@ if __name__ == '__main__':
     opt.add_argument('--binary_branching', action='store', dest='binary_branching',
                      default=0, type=int, choices=[0, 1, 2])
     opt.add_argument('--iters', action='store', dest='iters', type=int, required=True)
-    opt.add_argument('--training_loss_type', action='store', dest='training_loss_type',
-                     choices=['cs', 'cs_margin', 'mse', 'huber'], type=str, required=True)
+    ##opt.add_argument('--training_loss_type', action='store', dest='training_loss_type',
+    ##                 choices=['cs', 'cs_margin', 'mse', 'huber'], type=str, required=True)
     opt.add_argument('--penalty', action='store', dest='penalty', default=0.0, type=float)
     opt.add_argument('--rank_threshold', action='store', dest='rank_threshold', default=10, type=int, required=True)
     opt.add_argument('--verbose', action='store_true', dest='verbose', default=False)
@@ -344,6 +344,7 @@ if __name__ == '__main__':
     if l1_cloze_model.ortho_mode == 0:
         print('using random l2_init_weights')
         l2_encoder = make_wl_encoder(g_max_vocab, we_size, None)
+        l2_encoder.weight.data[:] = 0.0
     else:
         print('using FastText l2_init_weights')
         l2_init_weights = torch.load(options.l2_init_weights)
@@ -357,17 +358,12 @@ if __name__ == '__main__':
                                l1_key=l1_key,
                                l2_key=l2_key,
                                iters=options.iters,
-                               loss_type=options.training_loss_type,
+                               ##loss_type=options.training_loss_type,
                                ortho_mode=l1_cloze_model.ortho_mode)
     if options.gpuid > -1:
         cloze_model.init_cuda()
     cloze_model.init_key()
-    #en_en_sim = batch_cosine_sim(cloze_model.encoder.weight.data.clone(),
-    #                             cloze_model.encoder.weight.data.clone())
-    #_, en_en_neighbors = torch.topk(en_en_sim, 6, 1)
-    #cloze_model.en_en_neighbors = en_en_neighbors
     cloze_model.eval()
-    print(l1_cloze_model)
     print(cloze_model)
     print('total params', sum([p.numel() for p in cloze_model.parameters()]))
     print('trainable params', sum([p.numel() for p in cloze_model.parameters() if p.requires_grad]))
@@ -375,18 +371,17 @@ if __name__ == '__main__':
     weights = cloze_model.get_weight()
     init_weights = weights.clone()
     kwargs = vars(options)
-    pdb.set_trace()
     start_state = make_start_state(v2i, gv2i, i2v, i2gv, init_weights, cloze_model, dataset, **kwargs)
     now = time.time()
     best_state = beam_search_per_sentence(search_output,
                                           search_output_guesses,
                                           search_output_json,
                                           cloze_model, start_state, **kwargs)
-    #best_state = beam_search(cloze_model, start_state, **kwargs)
+    #best_state = beam_search(start_state, **kwargs)
     print('beam search completed', time.time() - now)
     print(str(best_state))
     _, all_swapped_types = best_state.swap_counts()
-    print(all_swapped_types, len(all_swapped_types))
+    print('num_exposed', len(all_swapped_types))
     l1_weights = cloze_model.encoder.weight.data.detach().clone()
     l2_weights = best_state.weights.detach().clone()
     nn, nn_dict = nearest_neighbors(l1_weights, l2_weights,

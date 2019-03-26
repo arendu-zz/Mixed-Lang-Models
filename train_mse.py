@@ -43,10 +43,12 @@ if __name__ == '__main__':
                      required=True, choices=['RNN', 'Attention'])
     opt.add_argument('--batch_size', action='store', type=int, dest='batch_size', default=20)
     opt.add_argument('--loss_type', action='store', type=str,
-                     choices=['cs', 'cs_margin', 'mse', 'huber'], required=True)
+                     choices=['ce', 'cs', 'cs_margin', 'mse', 'huber'], required=True)
     opt.add_argument('--gpuid', action='store', type=int, dest='gpuid', default=-1)
     opt.add_argument('--epochs', action='store', type=int, dest='epochs', default=50)
     opt.add_argument('--mask_val', action='store', type=float, dest='mask_val', default=0.2)
+    opt.add_argument('--noise_profile', action='store', type=int, dest='noise_profile',
+                     choices=[1, 2], default=1)
     opt.add_argument('--use_rand_hiddens', action='store', type=int, dest='use_rand_hiddens',
                      choices=[0, 1], default=0)
     opt.add_argument('--use_orthographic_model', action='store', type=int, dest='use_orthographic_model',
@@ -110,14 +112,11 @@ if __name__ == '__main__':
     #                                         l1_dict=v2i,
     #                                         loss_type=options.loss_type)
     #else:
-    if options.use_orthographic_model == 3 or options.use_orthographic_model == 4:
-        nn_mat = torch.load(options.nn_mat)
-        nn_mat = nn_mat[:, :options.nn_mat_size]
-        nn_mapper = torch.nn.Embedding(nn_mat.shape[0], nn_mat.shape[1])
-        nn_mapper.weight.data = nn_mat
-        nn_mapper.requires_grad = False
-    else:
-        nn_mapper = None
+    nn_mat = torch.load(options.nn_mat)
+    nn_mat = nn_mat[:, :options.nn_mat_size]
+    nn_mapper = torch.nn.Embedding(nn_mat.shape[0], nn_mat.shape[1])
+    nn_mapper.weight.data = nn_mat
+    nn_mapper.requires_grad = False
     context_encoder = make_context_encoder(options.context_encoder_type, emb_dim, options.model_size, v2i[SPECIAL_TOKENS.PAD])
     cloze_model = MSE_CLOZE(emb_dim,
                             l1_encoder,
@@ -127,7 +126,8 @@ if __name__ == '__main__':
                             options.use_orthographic_model,
                             options.use_rand_hiddens,
                             nn_mapper=nn_mapper,
-                            num_highways=options.num_highways)
+                            num_highways=options.num_highways,
+                            noise_profile=options.noise_profile)
 
     if options.gpuid > -1:
         cloze_model.init_cuda()
