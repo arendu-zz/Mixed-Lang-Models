@@ -3,7 +3,11 @@ __author__ = 'arenduchintala'
 import math
 import torch
 import torch.nn as nn
+
 import pdb
+
+from src.models.model_untils import BiRNNConextEncoder
+from src.models.model_untils import SelfAttentionalContextEncoder
 
 from torch.nn.utils.rnn import pack_padded_sequence as pack
 from torch.nn.utils.rnn import pad_packed_sequence as unpack
@@ -11,7 +15,10 @@ from src.utils.utils import SPECIAL_TOKENS
 
 from src.rewards import score_embeddings
 from src.rewards import rank_score_embeddings
+from src.rewards import get_nearest_neighbors
+
 from src.opt.noam import NoamOpt
+
 
 
 def batch_cosine_sim(a, b):
@@ -61,13 +68,14 @@ class MSE_CLOZE(nn.Module):
                  nn_mapper,
                  num_highways=1,
                  dropout=0.3,
+                 noise_profile=1,
                  max_grad_norm=5.):
         super().__init__()
         self.encoder = encoder
         self.nn_mapper = nn_mapper
         self.num_highways = num_highways
-        if ortho_mode == 3 or ortho_mode == 4:
-            assert self.nn_mapper is not None
+        self.noise_profile = noise_profile
+        assert self.nn_mapper is not None
         #_d = self.encoder.weight.data
         #_d = _d.div(_d.norm(dim=-1, keepdim=True).expand_as(_d))
         #self.encoder.weight.data = _d
@@ -86,10 +94,9 @@ class MSE_CLOZE(nn.Module):
                 nn.Dropout(dropout)] for i in range(self.num_highways)]
         seq = [leaf for tree in seq for leaf in tree]
         self.highway_ff = nn.Sequential(nn.Dropout(dropout),
-                                        #HighwayLayer((2 * self.rnn_size) + (1 * self.input_size)),
-                                        #nn.Dropout(dropout),
                                         *seq,
-                                        nn.Linear((self.context_encoder.output_size) + (1 * self.input_size), self.input_size))
+                                        nn.Linear((self.context_encoder.output_size) + (1 * self.input_size),
+                                        self.input_size))
         self.ortho_mode = ortho_mode
         self.hiddens_mode = hiddens_mode
         #self.tanh = torch.nn.Tanh()
@@ -101,6 +108,17 @@ class MSE_CLOZE(nn.Module):
             self.loss = torch.nn.SmoothL1Loss(reduction='sum')
         elif self.loss_type == 'cs' or self.loss_type == 'cs_margin':
             self.loss = torch.nn.CosineEmbeddingLoss(reduction='sum')
+        elif self.loss_type == 'ce':
+            self.loss = torch.nn.CrossEntropyLoss(reduction='sum',
+                                                  ignore_index=0)
+
+            linear_adjust = torch.nn.Linear((self.context_encoder.output_size) + (1 * self.input_size),
+                                            self.encoder.embedding_dim)
+            self.highway_ff = nn.Sequential(nn.Dropout(dropout),
+                                            *seq,
+                                            linear_adjust)
+            self.decoder = torch.nn.Linear(encoder.weight.size(1), encoder.weight.size(0), bias=False)
+            self.decoder.weight = encoder.weight
         else:
             raise BaseException("unknown loss type")
         self.max_grad_norm = max_grad_norm
@@ -108,8 +126,14 @@ class MSE_CLOZE(nn.Module):
         self.init_param_freeze()
         self.init_optimizer('Adam')
         self.word_mask_prob = 0.1
-        probs = torch.tensor([1.0 - self.word_mask_prob, self.word_mask_prob]).cuda()
+        probs = torch.tensor([1.0 - self.word_mask_prob, self.word_mask_prob])
         self.word_mask = torch.distributions.Categorical(probs=probs)
+        self.noise_prob = 0.6
+        noise_probs = torch.tensor([1.0 - self.noise_prob,
+                                    self.noise_prob * 0.5,
+                                    self.noise_prob * 0.5])
+        self.noise_mask = torch.distributions.Categorical(probs=noise_probs)
+        self.normal_noise = torch.distributions.Normal(torch.tensor(0.0), torch.tensor(1.0))
 
     def init_cuda(self,):
         self = self.cuda()
@@ -117,14 +141,26 @@ class MSE_CLOZE(nn.Module):
             self.context_encoder.z = self.context_encoder.z.cuda()
         probs = torch.tensor([1.0 - self.word_mask_prob, self.word_mask_prob]).cuda()
         self.word_mask = torch.distributions.Categorical(probs=probs)
+        noise_probs = torch.tensor([1.0 - self.noise_prob,
+                                    self.noise_prob * 0.5,
+                                    self.noise_prob * 0.5]).cuda()
+        self.noise_mask = torch.distributions.Categorical(probs=noise_probs)
+        self.normal_noise = torch.distributions.Normal(torch.tensor(0.0).cuda(), torch.tensor(1.0).cuda())
         return True
 
     def init_param_freeze(self,):
-        self.encoder.weight.requires_grad = False
-        if self.nn_mapper is not None:
-            self.nn_mapper.weight.requires_grad = False
-        for n, p in self.named_parameters():
-            print(n, p.requires_grad)
+        if self.loss_type == 'ce':
+            self.encoder.weight.requires_grad = True
+            if self.nn_mapper is not None:
+                self.nn_mapper.weight.requires_grad = False
+            for n, p in self.named_parameters():
+                print(n, p.requires_grad)
+        else:
+            self.encoder.weight.requires_grad = False
+            if self.nn_mapper is not None:
+                self.nn_mapper.weight.requires_grad = False
+            for n, p in self.named_parameters():
+                print(n, p.requires_grad)
 
     def is_cuda(self,):
         if hasattr(self.context_encoder, 'rnn'):
@@ -145,66 +181,92 @@ class MSE_CLOZE(nn.Module):
         else:
             raise NotImplementedError("unknown optimizer option")
 
-    def get_ortho_representations(self, l1_data, l1_data_encoded):
-        l1_rand = torch.zeros_like(l1_data).random_(0, self.encoder.num_embeddings).long().type_as(l1_data)
-        #l1_rand_encoded = self.tanh(self.encoder(l1_rand))
-        l1_rand_encoded = self.encoder(l1_rand)
-        if self.ortho_mode == 3:
-            nns = self.nn_mapper(l1_data)
-            nns_idx = torch.zeros_like(l1_data).random_(0, self.nn_mapper.embedding_dim - 1)
-            nns_idx = nns_idx.unsqueeze(2).expand_as(nns)
-            nns_samples = torch.gather(nns, 2, nns_idx)[:, :, 0]
-            #l1_nn_encoded = self.tanh(self.encoder(nns_samples))
-            l1_nn_encoded = self.encoder(nns_samples)
-            s = torch.zeros_like(l1_data).type_as(l1_data).random_(0, 2)
-            l1_rand_encoded[s == 1] = l1_nn_encoded[s == 1]
-        elif self.ortho_mode == 1:
-            l1_nn = torch.zeros_like(l1_data).random_(0, self.encoder.num_embeddings).long().type_as(l1_data)
-            #l1_nn_encoded = self.tanh(self.encoder(l1_nn))
-            l1_nn_encoded = self.encoder(l1_nn)
-            i = torch.zeros_like(l1_data).float().uniform_(0.0, 1.0).type_as(l1_rand_encoded)
-            i = i.unsqueeze(2).expand_as(l1_rand_encoded)
-            l1_nn_encoded = torch.mul(i, l1_nn_encoded) + torch.mul(1.0 - i, l1_rand_encoded)
-            s = torch.zeros_like(l1_data).type_as(l1_data).random_(0, 2)
-            l1_rand_encoded[s == 1] = l1_nn_encoded[s == 1]
-        elif self.ortho_mode == 4:
-            nns = self.nn_mapper(l1_data)
-            nns_idx = torch.zeros_like(l1_data).random_(0, self.nn_mapper.embedding_dim - 1)
-            nns_idx = nns_idx.unsqueeze(2).expand_as(nns)
-            nns_samples = torch.gather(nns, 2, nns_idx)[:, :, 0]
-            #l1_nn_encoded = self.tanh(self.encoder(nns_samples))
-            l1_nn_encoded = self.encoder(nns_samples)
-            s = torch.zeros_like(l1_data).type_as(l1_data).random_(0, 3)
-            l1_rand_encoded[s == 1] = l1_nn_encoded[s == 1]
-            l1_rand_encoded[s == 2] = l1_data_encoded[s == 2]
-        elif self.ortho_mode == 2:
-            l1_nn = torch.zeros_like(l1_data).random_(0, self.encoder.num_embeddings).long().type_as(l1_data)
-            #l1_nn_encoded = self.tanh(self.encoder(l1_nn))
-            l1_nn_encoded = self.encoder(l1_nn)
-            i = torch.zeros_like(l1_data).float().uniform_(0.0, 1.0).type_as(l1_rand_encoded)
-            i = i.unsqueeze(2).expand_as(l1_rand_encoded)
-            l1_nn_encoded = torch.mul(i, l1_nn_encoded) + torch.mul(1.0 - i, l1_rand_encoded)
-            s = torch.zeros_like(l1_data).type_as(l1_data).random_(0, 3)
-            l1_rand_encoded[s == 1] = l1_nn_encoded[s == 1]
-            l1_rand_encoded[s == 2] = l1_data_encoded[s == 2]
-        elif self.ortho_mode == 0:
-            l1_rand_encoded = l1_rand_encoded.fill_(0.0)
-        return l1_rand_encoded
+    #def get_ortho_representations(self, l1_data, l1_data_encoded):
+    #    raise NotImplementedError("unknown optimizer option")
+    #    l1_rand = torch.zeros_like(l1_data).random_(0, self.encoder.num_embeddings).long().type_as(l1_data)
+    #    #l1_rand_encoded = self.tanh(self.encoder(l1_rand))
+    #    l1_rand_encoded = self.encoder(l1_rand)
+    #    if self.ortho_mode == 3:
+    #        nns = self.nn_mapper(l1_data)
+    #        nns_idx = torch.zeros_like(l1_data).random_(0, self.nn_mapper.embedding_dim - 1)
+    #        nns_idx = nns_idx.unsqueeze(2).expand_as(nns)
+    #        nns_samples = torch.gather(nns, 2, nns_idx)[:, :, 0]
+    #        #l1_nn_encoded = self.tanh(self.encoder(nns_samples))
+    #        l1_nn_encoded = self.encoder(nns_samples)
+    #        s = torch.zeros_like(l1_data).type_as(l1_data).random_(0, 2)
+    #        l1_rand_encoded[s == 1] = l1_nn_encoded[s == 1]
+    #    elif self.ortho_mode == 1:
+    #        l1_nn = torch.zeros_like(l1_data).random_(0, self.encoder.num_embeddings).long().type_as(l1_data)
+    #        #l1_nn_encoded = self.tanh(self.encoder(l1_nn))
+    #        l1_nn_encoded = self.encoder(l1_nn)
+    #        i = torch.zeros_like(l1_data).float().uniform_(0.0, 1.0).type_as(l1_rand_encoded)
+    #        i = i.unsqueeze(2).expand_as(l1_rand_encoded)
+    #        l1_nn_encoded = torch.mul(i, l1_nn_encoded) + torch.mul(1.0 - i, l1_rand_encoded)
+    #        s = torch.zeros_like(l1_data).type_as(l1_data).random_(0, 2)
+    #        l1_rand_encoded[s == 1] = l1_nn_encoded[s == 1]
+    #    elif self.ortho_mode == 4:
+    #        nns = self.nn_mapper(l1_data)
+    #        nns_idx = torch.zeros_like(l1_data).random_(0, self.nn_mapper.embedding_dim - 1)
+    #        nns_idx = nns_idx.unsqueeze(2).expand_as(nns)
+    #        nns_samples = torch.gather(nns, 2, nns_idx)[:, :, 0]
+    #        #l1_nn_encoded = self.tanh(self.encoder(nns_samples))
+    #        l1_nn_encoded = self.encoder(nns_samples)
+    #        s = torch.zeros_like(l1_data).type_as(l1_data).random_(0, 3)
+    #        l1_rand_encoded[s == 1] = l1_nn_encoded[s == 1]
+    #        l1_rand_encoded[s == 2] = l1_data_encoded[s == 2]
+    #    elif self.ortho_mode == 2:
+    #        l1_nn = torch.zeros_like(l1_data).random_(0, self.encoder.num_embeddings).long().type_as(l1_data)
+    #        #l1_nn_encoded = self.tanh(self.encoder(l1_nn))
+    #        l1_nn_encoded = self.encoder(l1_nn)
+    #        i = torch.zeros_like(l1_data).float().uniform_(0.0, 1.0).type_as(l1_rand_encoded)
+    #        i = i.unsqueeze(2).expand_as(l1_rand_encoded)
+    #        l1_nn_encoded = torch.mul(i, l1_nn_encoded) + torch.mul(1.0 - i, l1_rand_encoded)
+    #        s = torch.zeros_like(l1_data).type_as(l1_data).random_(0, 3)
+    #        l1_rand_encoded[s == 1] = l1_nn_encoded[s == 1]
+    #        l1_rand_encoded[s == 2] = l1_data_encoded[s == 2]
+    #    elif self.ortho_mode == 0:
+    #        l1_rand_encoded = l1_rand_encoded.fill_(0.0)
+    #    return l1_rand_encoded
+
+    def get_noise_channel(self, l1_data, l1_encoded):
+        n_idx = self.noise_mask.sample(sample_shape=(l1_data.size(0), l1_data.size(1)))
+        n_idx[l1_data.eq(self.l1_dict[SPECIAL_TOKENS.PAD])] = 0
+        n_idx[l1_data.eq(self.l1_dict[SPECIAL_TOKENS.EOS])] = 0
+        n_idx[l1_data.eq(self.l1_dict[SPECIAL_TOKENS.BOS])] = 0
+        nns = self.nn_mapper(l1_data)
+        nns_idx = torch.empty_like(l1_data).random_(0, self.nn_mapper.embedding_dim - 1)
+        nns_idx = nns_idx.unsqueeze(2).expand_as(nns)
+        l1_nn = torch.gather(nns, 2, nns_idx)[:, :, 0]
+        l1_nn_encoded = self.encoder(l1_nn)
+
+        if self.noise_profile == 1:
+            l1_noisy = torch.zeros_like(l1_encoded).type_as(l1_encoded)
+            l1_noisy[n_idx == 0] = l1_encoded[n_idx == 0]                   # n_idx == 0 no noise
+            l1_noisy[n_idx == 1] = 0.0                                      # n_idx == 1 blank vector
+            l1_noisy[n_idx == 2] = l1_nn_encoded[n_idx == 2]                # n_idx == 2 nearest neighbors
+        elif self.noise_profile == 2:
+            l1_rand = torch.empty_like(l1_data).random_(0, self.encoder.num_embeddings)
+            l1_rand_encoded = self.encoder(l1_rand)
+            l1_noisy = torch.zeros_like(l1_encoded).type_as(l1_encoded)
+            l1_noisy[n_idx == 0] = l1_encoded[n_idx == 0]                   # n_idx == 0 no noise
+            l1_noisy[n_idx == 1] = l1_nn_encoded[n_idx == 1]                # n_idx == 1 nearest neighbors
+            l1_noisy[n_idx == 2] = l1_rand_encoded[n_idx == 2]              # n_idx == 2 rand words
+        else:
+            raise BaseException("unknown noise profile")
+
+        n_idx[n_idx.ne(0)] = 1
+        return l1_noisy, n_idx
 
     def get_hiddens(self, l1_data, encoded, lengths):
-        #packed_encoded = pack(encoded, lengths, batch_first=True)
-        # encoded = (batch_size x seq_len x embedding_size)
-        #packed_hidden, (h_t, c_t) = self.rnn(packed_encoded)
-        #hidden, lengths = unpack(packed_hidden, batch_first=True)
-        #z = self.z.expand(batch_size, 1, self.rnn_size)
-        #fwd_hidden = torch.cat((z, hidden[:, :-1, :self.rnn_size]), dim=1)
-        #bwd_hidden = torch.cat((hidden[:, 1:, self.rnn_size:], z), dim=1)
-        # bwd_hidden = (batch_size x seq_len x rnn_size)
-        # fwd_hidden = (batch_size x seq_len x rnn_size)
-        #hidden = torch.cat((fwd_hidden, bwd_hidden), dim=2)
-        hidden = self.context_encoder(l1_data, encoded, lengths)
+        if isinstance(self.context_encoder, BiRNNConextEncoder):
+            hidden = self.context_encoder(encoded, lengths)
+        elif isinstance(self.context_encoder, SelfAttentionalContextEncoder):
+            hidden = self.context_encoder(l1_data, encoded, lengths)
+        else:
+            raise NotImplementedError
         if self.hiddens_mode == 1:
-            rand_hidden = torch.zeros_like(hidden).type_as(hidden).uniform_(-1.0, 1.0)
+            rand_hidden = self.normal_noise.sample(sample_shape=(hidden.size(0), hidden.size(1), hidden.size(2)))
+            rand_hidden = rand_hidden.type_as(hidden)
             rand_hidden.requires_grad = False
             s = torch.zeros(hidden.shape[0], hidden.shape[1]).type_as(hidden).random_(0, 2).long()
             s.requires_grad = False
@@ -234,9 +296,9 @@ class MSE_CLOZE(nn.Module):
             loss = self.loss(pred, target)
             if self.loss_type.endswith('margin'):
                 raise BaseException("unknown loss type")
-        else:
-            raise BaseException("unknown loss type")
-
+        elif self.loss_type == 'ce':
+            pred = self.decoder(pred)
+            loss = self.loss(pred, target)
         return loss
 
     def forward(self, batch, get_acc=True):
@@ -251,21 +313,24 @@ class MSE_CLOZE(nn.Module):
         batch_size = l1_data.size(0)
         #l1_encoded = self.tanh(self.encoder(l1_data))
         l1_encoded = self.encoder(l1_data)
-        encoded = self.dropout(l1_encoded)
-        rand_mask = self.word_mask.sample(sample_shape=(l1_data.size(0), l1_data.size(1)))
-        rand = torch.zeros_like(encoded[rand_mask == 1, :]).uniform_(-1.0, 1.0)  # replace with rand vector
-        rand.requires_grad = False
-        encoded[rand_mask == 1, :] = rand
-        hidden = self.get_hiddens(l1_data, encoded, lengths)
-        hidden_ortho = self.get_ortho_representations(l1_data, l1_encoded)
-        hidden = torch.cat((hidden_ortho, hidden), dim=2)
+        n_encoded, n_idxs = self.get_noise_channel(l1_data, l1_encoded)
+        #encoded = self.dropout(l1_encoded)
+        #rand_mask = self.word_mask.sample(sample_shape=(l1_data.size(0), l1_data.size(1)))
+        #rand = torch.zeros_like(encoded[rand_mask == 1, :]).uniform_(-1.0, 1.0)  # replace with rand vector
+        #rand.requires_grad = False
+        #encoded[rand_mask == 1, :] = rand
+        hidden = self.get_hiddens(l1_data, n_encoded, lengths)
+        hidden = torch.cat((n_encoded, hidden), dim=2)
         hidden = self.dropout(hidden)
         #out = self.tanh(self.highway_ff(hidden))
         out = self.highway_ff(hidden)
-        out = out[l1_idxs == 1, :]
-        loss = self.get_loss(out, l1_encoded[l1_idxs == 1, :])
+        out = out[n_idxs == 1, :]  # we do this step to prevent the model from always trying to copy the n_encoded to the output
+        if self.loss_type == 'ce':
+            loss = self.get_loss(out, l1_data[n_idxs == 1])
+        else:
+            loss = self.get_loss(out, l1_encoded[n_idxs == 1, :])
         if get_acc:
-            acc = self.get_acc(out, self.encoder.weight.data, l1_data[l1_idxs == 1])
+            acc = self.get_acc(out, self.encoder.weight.data, l1_data[n_idxs == 1])
         else:
             acc = 0.0
         return loss, acc
@@ -300,7 +365,7 @@ class L2_MSE_CLOZE(nn.Module):
                  l1_key,
                  l2_key,
                  iters,
-                 loss_type,
+                 ##loss_type,
                  ortho_mode):
         super().__init__()
         self.context_encoder = context_encoder
@@ -318,10 +383,11 @@ class L2_MSE_CLOZE(nn.Module):
         self.l2_key = l2_key
         #self.z = torch.zeros(1, 1, self.rnn_size, requires_grad=False)
         self.iters = iters
-        self.loss_type = loss_type  # loss type used at training
+        ##self.loss_type = loss_type  # loss type used at training
         #self.init_cuda()
         self.init_key()
         self.init_param_freeze()
+        self.l2_exposure = {}
 
     def init_key(self,):
         if self.l1_key is not None:
@@ -361,7 +427,12 @@ class L2_MSE_CLOZE(nn.Module):
         # bwd_hidden = (batch_size x seq_len x rnn_size)
         # fwd_hidden = (batch_size x seq_len x rnn_size)
         #hidden = torch.cat((fwd_hidden, bwd_hidden), dim=2)
-        hidden = self.context_encoder(l1_data, encoded, lengths)
+        if isinstance(self.context_encoder, BiRNNConextEncoder):
+            hidden = self.context_encoder(encoded, lengths)
+        elif isinstance(self.context_encoder, SelfAttentionalContextEncoder):
+            hidden = self.context_encoder(l1_data, encoded, lengths)
+        else:
+            raise NotImplementedError
         return hidden
 
     def get_acc(self, pred, ref, l1_data):
@@ -385,8 +456,16 @@ class L2_MSE_CLOZE(nn.Module):
             else:
                 idx2update[l2_up] = o_up
         for i, up in idx2update.items():
-            self.l2_encoder.weight.data[i] = up.mean(0)
+            exp = self.l2_exposure.get(i, 1.0)
+            self.l2_encoder.weight.data[i] = (1.0 - (1.0 / exp)) * self.l2_encoder.weight.data[i] + \
+                                             (1.0 / exp) * up.mean(0)
         return True
+
+    def inspect_weights(self, l2):
+        arg_top_seen, cs_top_seen = get_nearest_neighbors(self.l2_encoder.weight.data,
+                                                          self.l1_encoded.weight.data,
+                                                          l2, 5)
+        pass
 
     def forward(self, batch):
         lengths, l1_data, l2_data, ind, _ = batch
@@ -425,6 +504,11 @@ class L2_MSE_CLOZE(nn.Module):
         if l2_idxs.nonzero().numel() > 0:
             self.update_l2_encoder(out, l2_data, l2_idxs)
         return 0.
+
+    def update_l2_exposure(self, l2_exposed):
+        for i in l2_exposed:
+            self.l2_exposure[i] = self.l2_exposure.get(i, 0.0) + 1.0
+
 
     def init_param_freeze(self,):
         for n, p in self.named_parameters():
