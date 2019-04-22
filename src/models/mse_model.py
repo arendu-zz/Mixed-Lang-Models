@@ -4,8 +4,6 @@ import math
 import torch
 import torch.nn as nn
 
-import pdb
-
 from src.models.model_untils import BiRNNConextEncoder
 from src.models.model_untils import SelfAttentionalContextEncoder
 
@@ -69,12 +67,14 @@ class MSE_CLOZE(nn.Module):
                  num_highways=1,
                  dropout=0.3,
                  noise_profile=1,
+                 loss_at='all',
                  max_grad_norm=5.):
         super().__init__()
         self.encoder = encoder
         self.nn_mapper = nn_mapper
         self.num_highways = num_highways
         self.noise_profile = noise_profile
+        self.loss_at = loss_at
         assert self.nn_mapper is not None
         #_d = self.encoder.weight.data
         #_d = _d.div(_d.norm(dim=-1, keepdim=True).expand_as(_d))
@@ -106,19 +106,6 @@ class MSE_CLOZE(nn.Module):
             self.loss = torch.nn.MSELoss(reduction='sum')
         elif self.loss_type == 'huber':
             self.loss = torch.nn.SmoothL1Loss(reduction='sum')
-        elif self.loss_type == 'cs' or self.loss_type == 'cs_margin':
-            self.loss = torch.nn.CosineEmbeddingLoss(reduction='sum')
-        elif self.loss_type == 'ce':
-            self.loss = torch.nn.CrossEntropyLoss(reduction='sum',
-                                                  ignore_index=0)
-
-            linear_adjust = torch.nn.Linear((self.context_encoder.output_size) + (1 * self.input_size),
-                                            self.encoder.embedding_dim)
-            self.highway_ff = nn.Sequential(nn.Dropout(dropout),
-                                            *seq,
-                                            linear_adjust)
-            self.decoder = torch.nn.Linear(encoder.weight.size(1), encoder.weight.size(0), bias=False)
-            self.decoder.weight = encoder.weight
         else:
             raise BaseException("unknown loss type")
         self.max_grad_norm = max_grad_norm
@@ -180,53 +167,6 @@ class MSE_CLOZE(nn.Module):
             self.optimizer = NoamOpt(self.emb_size, 100, _optimizer)
         else:
             raise NotImplementedError("unknown optimizer option")
-
-    #def get_ortho_representations(self, l1_data, l1_data_encoded):
-    #    raise NotImplementedError("unknown optimizer option")
-    #    l1_rand = torch.zeros_like(l1_data).random_(0, self.encoder.num_embeddings).long().type_as(l1_data)
-    #    #l1_rand_encoded = self.tanh(self.encoder(l1_rand))
-    #    l1_rand_encoded = self.encoder(l1_rand)
-    #    if self.ortho_mode == 3:
-    #        nns = self.nn_mapper(l1_data)
-    #        nns_idx = torch.zeros_like(l1_data).random_(0, self.nn_mapper.embedding_dim - 1)
-    #        nns_idx = nns_idx.unsqueeze(2).expand_as(nns)
-    #        nns_samples = torch.gather(nns, 2, nns_idx)[:, :, 0]
-    #        #l1_nn_encoded = self.tanh(self.encoder(nns_samples))
-    #        l1_nn_encoded = self.encoder(nns_samples)
-    #        s = torch.zeros_like(l1_data).type_as(l1_data).random_(0, 2)
-    #        l1_rand_encoded[s == 1] = l1_nn_encoded[s == 1]
-    #    elif self.ortho_mode == 1:
-    #        l1_nn = torch.zeros_like(l1_data).random_(0, self.encoder.num_embeddings).long().type_as(l1_data)
-    #        #l1_nn_encoded = self.tanh(self.encoder(l1_nn))
-    #        l1_nn_encoded = self.encoder(l1_nn)
-    #        i = torch.zeros_like(l1_data).float().uniform_(0.0, 1.0).type_as(l1_rand_encoded)
-    #        i = i.unsqueeze(2).expand_as(l1_rand_encoded)
-    #        l1_nn_encoded = torch.mul(i, l1_nn_encoded) + torch.mul(1.0 - i, l1_rand_encoded)
-    #        s = torch.zeros_like(l1_data).type_as(l1_data).random_(0, 2)
-    #        l1_rand_encoded[s == 1] = l1_nn_encoded[s == 1]
-    #    elif self.ortho_mode == 4:
-    #        nns = self.nn_mapper(l1_data)
-    #        nns_idx = torch.zeros_like(l1_data).random_(0, self.nn_mapper.embedding_dim - 1)
-    #        nns_idx = nns_idx.unsqueeze(2).expand_as(nns)
-    #        nns_samples = torch.gather(nns, 2, nns_idx)[:, :, 0]
-    #        #l1_nn_encoded = self.tanh(self.encoder(nns_samples))
-    #        l1_nn_encoded = self.encoder(nns_samples)
-    #        s = torch.zeros_like(l1_data).type_as(l1_data).random_(0, 3)
-    #        l1_rand_encoded[s == 1] = l1_nn_encoded[s == 1]
-    #        l1_rand_encoded[s == 2] = l1_data_encoded[s == 2]
-    #    elif self.ortho_mode == 2:
-    #        l1_nn = torch.zeros_like(l1_data).random_(0, self.encoder.num_embeddings).long().type_as(l1_data)
-    #        #l1_nn_encoded = self.tanh(self.encoder(l1_nn))
-    #        l1_nn_encoded = self.encoder(l1_nn)
-    #        i = torch.zeros_like(l1_data).float().uniform_(0.0, 1.0).type_as(l1_rand_encoded)
-    #        i = i.unsqueeze(2).expand_as(l1_rand_encoded)
-    #        l1_nn_encoded = torch.mul(i, l1_nn_encoded) + torch.mul(1.0 - i, l1_rand_encoded)
-    #        s = torch.zeros_like(l1_data).type_as(l1_data).random_(0, 3)
-    #        l1_rand_encoded[s == 1] = l1_nn_encoded[s == 1]
-    #        l1_rand_encoded[s == 2] = l1_data_encoded[s == 2]
-    #    elif self.ortho_mode == 0:
-    #        l1_rand_encoded = l1_rand_encoded.fill_(0.0)
-    #    return l1_rand_encoded
 
     def get_noise_channel(self, l1_data, l1_encoded):
         n_idx = self.noise_mask.sample(sample_shape=(l1_data.size(0), l1_data.size(1)))
@@ -324,13 +264,22 @@ class MSE_CLOZE(nn.Module):
         hidden = self.dropout(hidden)
         #out = self.tanh(self.highway_ff(hidden))
         out = self.highway_ff(hidden)
-        out = out[n_idxs == 1, :]  # we do this step to prevent the model from always trying to copy the n_encoded to the output
-        if self.loss_type == 'ce':
-            loss = self.get_loss(out, l1_data[n_idxs == 1])
+        if self.loss_at == 'all':
+            out_l = out.view(-1, out.size(-1))
+            l1_data_l = l1_data.view(-1)
+            l1_encoded_l = l1_encoded.view(-1, l1_encoded.size(-1))
+        elif self.loss_at == 'noise':
+            out_l = out[n_idxs == 1, :]  # we do this step to prevent the model from always trying to copy the n_encoded to the output
+            l1_data_l = l1_data[n_idxs == 1]
+            l1_encoded_l = l1_encoded[n_idxs == 1, :]
         else:
-            loss = self.get_loss(out, l1_encoded[n_idxs == 1, :])
+            raise BaseException("unknown loss at")
+        if self.loss_type == 'ce':
+            loss = self.get_loss(out_l, l1_data_l)
+        else:
+            loss = self.get_loss(out_l, l1_encoded_l)
         if get_acc:
-            acc = self.get_acc(out, self.encoder.weight.data, l1_data[n_idxs == 1])
+            acc = self.get_acc(out_l, self.encoder.weight.data, l1_data_l)
         else:
             acc = 0.0
         return loss, acc
@@ -364,6 +313,7 @@ class L2_MSE_CLOZE(nn.Module):
                  l2_dict,
                  l1_key,
                  l2_key,
+                 l2_key_wt,
                  iters,
                  ##loss_type,
                  ortho_mode):
@@ -371,8 +321,8 @@ class L2_MSE_CLOZE(nn.Module):
         self.context_encoder = context_encoder
         #self.rnn_size = self.rnn.hidden_size
         self.highway_ff = highway_ff
-        self.encoder = encoder
-        self.l2_encoder = l2_encoder
+        self._encoder = encoder
+        self._l2_encoder = l2_encoder
         #self.tanh = torch.nn.Tanh()
         self.ortho_mode = ortho_mode
         self.l1_dict = l1_dict
@@ -381,6 +331,7 @@ class L2_MSE_CLOZE(nn.Module):
         self.l2_dict_idx = {v: k for k, v in l2_dict.items()}
         self.l1_key = l1_key
         self.l2_key = l2_key
+        self.l2_key_wt = l2_key_wt
         #self.z = torch.zeros(1, 1, self.rnn_size, requires_grad=False)
         self.iters = iters
         ##self.loss_type = loss_type  # loss type used at training
@@ -398,6 +349,11 @@ class L2_MSE_CLOZE(nn.Module):
         if self.l2_key is not None:
             if self.is_cuda():
                 self.l2_key = self.l2_key.cuda()
+            else:
+                pass
+        if self.l2_key_wt is not None:
+            if self.is_cuda():
+                self.l2_key_wt = self.l2_key_wt.cuda()
             else:
                 pass
 
@@ -456,9 +412,10 @@ class L2_MSE_CLOZE(nn.Module):
             else:
                 idx2update[l2_up] = o_up
         for i, up in idx2update.items():
-            exp = self.l2_exposure.get(i, 1.0)
-            self.l2_encoder.weight.data[i] = (1.0 - (1.0 / exp)) * self.l2_encoder.weight.data[i] + \
-                                             (1.0 / exp) * up.mean(0)
+            #exp = self.l2_exposure.get(i, 1.0)
+            exp = 2.0
+            self._l2_encoder.weight.data[i] = (1.0 - (1.0 / exp)) * self._l2_encoder.weight.data[i] + \
+                                              (1.0 / exp) * up.mean(0)
         return True
 
     def inspect_weights(self, l2):
@@ -478,8 +435,8 @@ class L2_MSE_CLOZE(nn.Module):
                 ind[l1_data.eq(self.l1_dict[st])] = 0
         batch_size = l1_data.size(0)
         assert batch_size == 1
-        l1_encoded = self.encoder(l1_data)
-        l2_encoded = self.l2_encoder(l2_data)
+        l1_encoded = self._encoder(l1_data)
+        l2_encoded = self._l2_encoder(l2_data)
         mixed_encoded = self.mix_inputs(l1_encoded, l2_encoded, l1_idxs, l2_idxs)
         mixed_data = self.mix_inputs(l1_data, l2_data, l1_idxs, l2_idxs)
         #mixed_encoded = self.tanh(mixed_encoded)
@@ -505,10 +462,14 @@ class L2_MSE_CLOZE(nn.Module):
             self.update_l2_encoder(out, l2_data, l2_idxs)
         return 0.
 
+    def learn_step(self, batch):
+        with torch.no_grad():
+            _ = self(batch)
+        return True
+
     def update_l2_exposure(self, l2_exposed):
         for i in l2_exposed:
             self.l2_exposure[i] = self.l2_exposure.get(i, 0.0) + 1.0
-
 
     def init_param_freeze(self,):
         for n, p in self.named_parameters():
@@ -530,23 +491,33 @@ class L2_MSE_CLOZE(nn.Module):
         else:
             raise BaseException("unknown context_encoder")
 
-    def get_weight(self,):
+    def get_l1_weights(self, on_device=True):
         #TODO: push this function into l2_encoder object
-        if isinstance(self.l2_encoder, torch.nn.Embedding):
-            weights = self.l2_encoder.weight.clone().detach()
+        if isinstance(self._encoder, torch.nn.Embedding):
+            weights = self._encoder.weight.clone().detach()
         else:
             raise BaseException("unknown l2_encoder type")
-        if self.is_cuda():
+        if self.is_cuda() and not on_device:
             weights = weights.cpu()
         return weights
 
-    def update_g_weights(self, weights):
+    def get_l2_weights(self, on_device=True):
+        #TODO: push this function into l2_encoder object
+        if isinstance(self._l2_encoder, torch.nn.Embedding):
+            weights = self._l2_encoder.weight.clone().detach()
+        else:
+            raise BaseException("unknown l2_encoder type")
+        if self.is_cuda() and not on_device:
+            weights = weights.cpu()
+        return weights
+
+    def set_l2_weights(self, weights):
         #TODO: push this function into l2_encoder object
         if self.is_cuda():
             weights = weights.clone().cuda()
         else:
             weights = weights.clone()
-        if isinstance(self.l2_encoder, torch.nn.Embedding):
-            self.l2_encoder.weight.data = weights
+        if isinstance(self._l2_encoder, torch.nn.Embedding):
+            self._l2_encoder.weight.data = weights
         else:
             raise BaseException("unknown l2_encoder type")

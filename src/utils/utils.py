@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# -*- coding: utf-8 -*-
 __author__ = 'arenduchintala'
 import random
 import torch

@@ -15,8 +15,8 @@ from src.rewards import rank_score_embeddings
 
 from .transformer_encoder_layer import TransformerEncoderLayer
 
+import pickle
 import pdb
-
 
 def get_unsort_idx(sort_idx):
     unsort_idx = torch.zeros_like(sort_idx).long().scatter_(0, sort_idx, torch.arange(sort_idx.size(0)).long())
@@ -317,3 +317,5 @@ class SinusoidalPositionalEncoding(nn.Module):
     def forward(self, x):
         pos = torch.arange(x.shape[1]).expand_as(x).type_as(x)
         return self.pe(pos)
+
+

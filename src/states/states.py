@@ -5,6 +5,9 @@ import random
 import json
 
 from src.utils.utils import TEXT_EFFECT
+from pylatexenc.latexencode import utf8tolatex
+
+import pdb
 
 
 NEXT_SENT = (-1, None)
@@ -17,7 +20,7 @@ class PriorityQ(object):
 
     def append(self, item):
         self.queue.append(item)
-        self.queue.sort(key=lambda x: (x.score, x.swap_token_counts), reverse=True)
+        self.queue.sort(key=lambda x: (x.score, -x.swap_type_counts, x.swap_token_counts), reverse=True)
         self.queue = self.queue[:self.maxsize]  # keep best successors
 
     def pop(self, stochastic=False):
@@ -56,9 +59,10 @@ class MacaronicState(object):
         self.start_score = start_score
         self.terminal = False
         self.swap_token_counts = 0
+        self.swap_type_counts = 0
 
     def tie_break_score(self,):
-        return (self.score, -self.swap_token_counts)  # to break ties
+        return (self.score, -self.swap_type_counts, self.swap_token_counts)  # to break ties
 
     def to_json(self,):
         j = []
@@ -74,6 +78,8 @@ class MacaronicState(object):
             if sent_id == self.displayed_sentence_idx:
                 break
         actions, _ = self.possible_actions()
+        s.append('swap_types       :' + str(self.swap_type_counts))
+        s.append('swap_token_count:' + str(self.swap_token_counts))
         s.append('possible_children:' + str(len(actions)))
         s.append('weightid         :' + str(id(self.weights)))
         s.append('is_terminal      :' + str(self.terminal))
@@ -136,13 +142,13 @@ class MacaronicState(object):
 
     def next_state(self, action, apply_swap_func, **kwargs):
         assert isinstance(action, tuple)
-        assert kwargs['reward_type'] == 'type_mrr_assist_check'
-        c = self.copy()
-        current_displayed_config = c.current_sentence()
+        #assert kwargs['reward_type'] == 'type_mrr_assist_check'
         #print(c)
         if action == NEXT_SENT:
+            c = self.copy()
+            current_displayed_config = c.current_sentence()
             #TODO: why do we need to use apply_swap_func???
-            swap_token_count, swap_types = c.swap_counts()
+            swap_token_counts, swap_types = c.swap_counts()
             swap_result = apply_swap_func(current_displayed_config,
                                           c.model,
                                           c.weights,
@@ -150,10 +156,14 @@ class MacaronicState(object):
                                           **kwargs)
             c.weights = swap_result['weights']
             c.swap_token_counts = self.swap_token_counts
-            assert swap_token_count == c.swap_token_counts
+            c.swap_type_counts = len(swap_types)
+            assert swap_token_counts == c.swap_token_counts
             #if c.score != c.start_score + (swap_result['score'] - (kwargs['penalty'] * swap_type_count)):
             #if c.score != c.start_score + swap_result['score']:
             if c.score != swap_result['score']:
+                print(str(c.score) + ' is the original c.score')
+                print(str(swap_result['score']) + ' is the new score!!')
+                print(c)
                 raise BaseException("c.score may not correct!")
 
             #c.score = c.start_score + (swap_result['score'] - (kwargs['penalty'] * swap_type_count))
@@ -172,12 +182,17 @@ class MacaronicState(object):
         else:
             #print(action)
             #print('before', current_displayed_config)
+            #swap_token_counts, swap_types = c.swap_counts()
+            #print(swap_types)
+            c = self.copy()
+            current_displayed_config = c.current_sentence()
             current_displayed_config.update_config(action)
             #print('after', current_displayed_config)
+            #swap_token_counts, swap_types = c.swap_counts()
+            #print(swap_types)
+            swap_token_counts, swap_types = c.swap_counts()
             if action[1] or action[0] == 1:
-                swap_token_count, swap_types = c.swap_counts()
-                #swap_type_count = len(swap_types)
-                c.swap_token_counts = self.swap_token_counts + (1 if action[1] else 0)
+                #c.swap_token_counts = self.swap_token_counts + (1 if action[1] else 0)
                 swap_result = apply_swap_func(current_displayed_config,
                                               c.model,
                                               c.weights,
@@ -189,11 +204,13 @@ class MacaronicState(object):
                 #c.score = c.start_score + swap_result['score']
                 c.score = swap_result['score']
                 c.swap_token_counts = self.swap_token_counts + (1 if action[1] else 0)
-                assert swap_token_count == c.swap_token_counts
+                c.swap_type_counts = len(swap_types)
+                assert swap_token_counts == c.swap_token_counts
             else:
                 #assert self.score == swap_result['score'] - (kwargs['penalty'] * swap_type_count)
                 c.score = self.score
                 c.swap_token_counts = self.swap_token_counts
+                c.swap_type_counts = self.swap_type_counts
             next_state = c
         return next_state
 
@@ -310,6 +327,12 @@ class MacaronicSentence(object):
         else:
             return w1 #TEXT_EFFECT.YELLOW + w1 + TEXT_EFFECT.END
 
+    def latex_it(self, w1, w2, w_idx):
+        if w_idx in self.swapped:
+            return '\\cc{' + utf8tolatex(w2) + '}'
+        else:
+            return utf8tolatex(w1)
+
     def to_obj_list(self):
         j = []
         for idx, tl1, tl2, il1, il2 in zip(range(self.len), self.tokens_l1, self.tokens_l2, self.int_l1.view(-1), self.int_l2.view(-1)):
@@ -325,6 +348,11 @@ class MacaronicSentence(object):
 
     def to_json(self,):
         return json.dumps(self.to_obj_list())
+
+    def to_latex(self,):
+        s = [self.latex_it(tl1, tl2, idx)
+             for idx, tl1, tl2 in zip(range(self.len), self.tokens_l1, self.tokens_l2)]
+        return ' '.join(s[1:-1])
 
     def display_macaronic(self,):
         s = [self.color_it(tl1, tl2, idx)

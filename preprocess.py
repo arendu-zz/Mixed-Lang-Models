@@ -33,6 +33,7 @@ if __name__ == '__main__':
     print(args)
 
     if args.do_l1:
+        print("l1 preprocessing...")
         preprocess_l1 = Preprocess_L1()
         corpus_file = os.path.join(args.lmdata, args.l1_data_name, 'corpus.en')
         dev_file = os.path.join(args.lmdata, args.l1_data_name, 'dev.en')
@@ -53,22 +54,26 @@ if __name__ == '__main__':
         print("skip_l1 preprocessing...")
 
     if args.do_l2:
+        print("l2 preprocessing...")
         save_dir = os.path.join(args.aligned_data, args.l2_data_name, args.l1_data_name)
         preprocess_l2 = Preprocess_L2()
-        ft_model = fastText.load_model(args.word_vec_bin)
+        print("loading word_vec_bin...")
+        ft_model = None #fastText.load_model(args.word_vec_bin)
+        print("building...")
         l2_v2idx = preprocess_l2.build(l1_data_dir=os.path.join(args.lmdata, args.l1_data_name),
                                        l2_data_dir=os.path.join(args.aligned_data, args.l2_data_name),
                                        l2_save_dir=save_dir,
-                                       ft_model=ft_model)
+                                       ft_model=ft_model,
+                                       max_word_len=args.max_word_len)
         l1_v2idx = pickle.load(open(os.path.join(args.lmdata, args.l1_data_name, 'l1.v2idx.pkl'), 'rb'))
-        ed_mat = torch.zeros(len(l2_v2idx), len(l1_v2idx))
-        i = 0
-        for l2_v, l2_idx in l2_v2idx.items():
-            print(i, len(l2_v2idx))
-            i += 1
-            for l1_v, l1_idx in l1_v2idx.items():
-                ed = float(editdistance.eval(l2_v, l1_v)) / float(len(l2_v))
-                ed_mat[l2_idx, l1_idx] = ed
-        torch.save(ed_mat, os.path.join(args.aligned_data, args.l2_data_name, 'l2.l1.ed.mat.pt'))
+        #ed_mat = torch.zeros(len(l2_v2idx), len(l1_v2idx))
+        #i = 0
+        #for l2_v, l2_idx in l2_v2idx.items():
+        #    print(i, len(l2_v2idx))
+        #    i += 1
+        #    for l1_v, l1_idx in l1_v2idx.items():
+        #        ed = float(editdistance.eval(l2_v, l1_v)) / float(len(l2_v))
+        #        ed_mat[l2_idx, l1_idx] = ed
+        #torch.save(ed_mat, os.path.join(args.aligned_data, args.l2_data_name, 'l2.l1.ed.mat.pt'))
     else:
         print("skip_l2 preprocessing...")

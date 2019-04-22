@@ -61,26 +61,26 @@ def get_nearest_neighbors_simple(a_emb, b_emb, r):
     return arg_top
 
 
-
-def mrr_score_embeddings(l2_embedding, l1_embedding, l2_key, l1_key, rank_threshold):
+def mrr_score_embeddings(l2_embedding, l1_embedding, l2_key, l1_key, rank_threshold, l2_key_wt):
     l2_key = l2_key.type_as(l1_embedding).long()
     l1_key = l1_key.type_as(l1_embedding).long()
+    assert l2_key.shape == l2_key_wt.shape
     cs = batch_cosine_sim(l2_embedding[l2_key], l1_embedding)
     _, arg_top_S = torch.topk(cs, rank_threshold, 1, sorted=True)
     reciprocal_ranks = []
-    for idx, (l2_k, l1_k) in enumerate(zip(l2_key, l1_key)):
+    for idx, (l2_kw, l2_k, l1_k) in enumerate(zip(l2_key_wt, l2_key, l1_key)):
         m = (arg_top_S[idx] == l1_k.item()).nonzero()
         if m.numel() > 0:
             r = float(m.min().item()) + 1.0
         else:
             r = np.inf
-        reciprocal_ranks.append(1.0 / r)
+        reciprocal_ranks.append(l2_kw.item() * (1.0 / r))
     score = sum(reciprocal_ranks) / (float(len(reciprocal_ranks)) + 1e-4)
     return score
 
 
 def mmr_score_embedding_with_assist_check(l2_embedding, l1_embedding, l2_key, l1_key,
-                                          l2_seq, l1_seq, l2_seq_idx, rank_threshold):
+                                          l2_seq, l1_seq, l2_seq_idx, rank_threshold, l2_key_wt):
     if l2_seq_idx.nonzero().numel() > 0:
         l2_seq = l2_seq.type_as(l1_embedding).long()
         l2_seq_idx = l2_seq_idx.type_as(l1_embedding).long()
@@ -88,25 +88,26 @@ def mmr_score_embedding_with_assist_check(l2_embedding, l1_embedding, l2_key, l1
         l2_seq_key_used = l2_seq[l2_seq_idx == 1]
         l1_seq_key_used = l1_seq[l2_seq_idx == 1]
         if (l1_seq_key_used == 3).nonzero().numel() > 0:
-            token_score = -np.inf  # if the configuration wants to swap a rare English word, we prevent it here...
+            token_score = -1.0 #-np.inf  # if the configuration wants to swap a rare English word, we prevent it here...
         else:
             cs_seq = batch_cosine_sim(l2_embedding[l2_seq_key_used], l1_embedding)
             _, arg_top_S = torch.topk(cs_seq, rank_threshold, 1, sorted=True)
             l1_exp_S = l1_seq_key_used.unsqueeze(1).expand_as(arg_top_S)
             nz = (arg_top_S == l1_exp_S).nonzero()
             if nz.shape[0] == arg_top_S.shape[0]:
-                token_score = 0.0
+                token_score = 1.0
             elif nz.shape[0] < arg_top_S.shape[0]:
-                token_score = -np.inf  # there has been a assist
+                token_score = -1.0 #-np.inf  # there has been a assist
             elif nz.shape[0] > arg_top_S.shape[0]:
                 raise BaseException("Can this even happen??")
             else:
                 raise BaseException("all bases covered, why am i here??")
     else:
-        token_score = 0.0
+        token_score = 1.0
 
-    type_score = mrr_score_embeddings(l2_embedding, l1_embedding, l2_key, l1_key, rank_threshold)
-    return token_score + type_score
+    type_score = mrr_score_embeddings(l2_embedding, l1_embedding, l2_key, l1_key, rank_threshold, l2_key_wt)
+    final_score = token_score * type_score
+    return max(0, final_score)
 
 
 def token_mrr_score_embeddings(l2_embedding, l1_embedding, l2_key, l1_key, l2_idx, rank_threshold):
@@ -150,7 +151,6 @@ def token_mrr_score_embeddings(l2_embedding, l1_embedding, l2_key, l1_key, l2_id
     return score
 
 def token_rank_score_embeddings(l2_embedding, l1_embedding, l2_key, l1_key, l2_idx, rank_threshold):
-    pdb.set_trace()
     if l2_idx.nonzero().numel() > 0:
         l2_key = l2_key.type_as(l1_embedding).long()
         l2_idx = l2_idx.type_as(l1_embedding).long()

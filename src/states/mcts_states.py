@@ -18,6 +18,7 @@ class SearchTree(object):
         self.backup_type = mcts_params['backup_type']
         self.C = mcts_params.get('const_C', 0.01)
         self.D = mcts_params.get('const_D', 10.0)
+        self.fast_skip = mcts_params.get('fast_skip', 0)
         self.consecutive_action_threshold = 1
 
     def recursive_search(self, root_node):
@@ -32,41 +33,36 @@ class SearchTree(object):
         self.nodes_seen[str(root_node.state)] = root_node
         #best_action_count = 0
         #prev_best_action = None
-        for _ in range(self.iters):
-            print('************************ search iter' + str(_) + '*************************')
+        #for _ in range(self.iters):
+        iter_count = 0
+        while iter_count < self.iters:
+            iter_count += 1
+            print('************************ search iter' + str(iter_count) + '*************************')
             print('======root node=====\n', root_node)
             if root_node.completed_expansion:
-                _c, _v, _u, _vt, _a, _vis = self.display_child_values(root_node, self.C)
-            else:
-                print('not completed_expansion')
-                #rank = tuple(np.array(_vis).argsort().argsort().tolist())
-                #if rank == prev_rank:
-                #    same_rank += 1
-                #else:
-                #    same_rank = 0
-                #prev_rank = rank
-                #print('same_rank', same_rank, rank)
-                #if max(_vis) - min(_vis) >= 3:
-                #    break
-            #    best_action, best_node = self.select_child(root_node, self.C)
-            #    best_action_count = best_action_count + 1 if best_action == prev_best_action else 0
-            #    prev_best_action = best_action
-            #    if best_action_count > self.consecutive_action_threshold:
-            #        return best_node
-
+                _c, _v, _u, _vt, _a, _vis, _vis_diff = self.display_child_values(root_node, self.C)
+                if _vis_diff > self.iters and self.fast_skip == 1:
+                    print('large visit_difference!')
+                    iter_count = self.iters
             node, search_sequence = self.selection(root_node)
             print('===selection node===\n', node)
-            if not node.state.terminal:
+            if node.state.terminal:
+                reward = node.state.score # - root_node.state.score
+            else:
                 node, search_sequence = self.expansion(node, search_sequence)
                 print('===expansion node===\n', node)
-                if not node.state.terminal:
-                    rollout_state = self.rollout(node)
-                    print('===rollout state===\n', rollout_state)
-                    reward = rollout_state.score  # - root_node.state.score
-            else:
-                reward = node.state.score # - root_node.state.score
+                if node.state.terminal:
+                    reward = node.state.score # - root_node.state.score
+                else:
+                    if node.state.score == 0.0 and node.state.swap_type_counts > 0:
+                        reward = 0.0 # if the expansion is a bad state, do not bother with rollout
+                        print('===rollout state===\n', 'skipping rollout')
+                    else:
+                        rollout_state = self.rollout(node)
+                        print('===rollout state===\n', rollout_state)
+                        reward = rollout_state.score  # - root_node.state.score
             self.backup(reward, 0, search_sequence)
-            print('********************** end search iter' + str(_) + '*******************')
+            print('********************** end search iter' + str(iter_count) + '*******************')
         best_action, best_node = self.select_child(root_node, 0.0)
         return best_node
 
@@ -94,9 +90,6 @@ class SearchTree(object):
         rollout_start_state.binary_branching = self.rollout_params['rollout_binary_branching']
         state = self.rollout_func(rollout_start_state, **self.rollout_params)
         print('rollout time', time.time() - now)
-        if rollout_start_state.score == float('-inf'):
-            state.score = 0.0
-            print('forcing score to 0.0 because rollout_start_state is bad')
         return state
 
     def backup(self, reward, winner, search_sequence):
@@ -117,16 +110,21 @@ class SearchTree(object):
 
     def display_child_values(self, node, exp_param):
         combined, values, ucb, variance_terms, actions, visits = self.child_scores(node, exp_param)
+        sorted_visits = sorted(visits, reverse=True)
+        if len(sorted_visits) > 1:
+            visit_difference = sorted_visits[0] - sorted_visits[1]
+        else:
+            visit_difference = 0.0
         f = [(a, c, v, u, vrt, vs) for a, c, v, u, vrt, vs in zip(actions, combined, values, ucb, variance_terms, visits)]
         s = '\n'.join(['combined %0.4f' % c +
                        ' value: %0.4f' % v +
                        ' ucb: %0.4f' % u +
-                       ' var_term:' + str(vrt) +
+                       ' var_term: %0.4f' % vrt +
                        ' action:' + str(a) +
                        ' visits:' + str(vs) for
                        a, c, v, u, vrt, vs in sorted(f)])
         print(s)
-        return combined, values, ucb, variance_terms, actions, visits
+        return combined, values, ucb, variance_terms, actions, visits, visit_difference
 
     def child_scores(self, node, exp_param):
         n_visits = float(node.visits)
