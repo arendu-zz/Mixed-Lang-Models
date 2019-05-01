@@ -3,12 +3,13 @@ import torch
 import pickle
 from src.rewards import get_nearest_neighbors_simple
 import sys
+import os
 
 
-def save_nn_mat(vmat, idx2v, l1_data):
+def save_nn_mat(vmat, idx2v, data_dir):
     r = 5000
     nn_list = []
-    nn_txt = open(l1_data + '/l1.nn.txt', 'w')
+    nn_txt = open(os.path.join(data_dir + 'l1.nn.txt'), 'w')
     for i in range(int(vmat.shape[0] // r) + 1):
         min_ = r * i
         max_ = r * (i + 1)
@@ -24,7 +25,7 @@ def save_nn_mat(vmat, idx2v, l1_data):
         nn_list.append(f)
     nn_txt.close()
     nn_mat = torch.cat(nn_list, dim=0)
-    torch.save(nn_mat, l1_data + '/l1.nn.pt')
+    torch.save(nn_mat, os.path.join(data_dir, 'l1.nn.pt'))
 
 
 if __name__ == '__main__':

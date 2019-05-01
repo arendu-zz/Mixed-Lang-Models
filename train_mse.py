@@ -44,6 +44,8 @@ if __name__ == '__main__':
     opt.add_argument('--batch_size', action='store', type=int, dest='batch_size', default=20)
     opt.add_argument('--loss_type', action='store', type=str,
                      choices=['ce', 'cs', 'cs_margin', 'mse', 'huber'], required=True)
+    opt.add_argument('--loss_at', action='store', type=str,
+                     choices=['all', 'noise'], required=True)
     opt.add_argument('--gpuid', action='store', type=int, dest='gpuid', default=-1)
     opt.add_argument('--epochs', action='store', type=int, dest='epochs', default=50)
     opt.add_argument('--mask_val', action='store', type=float, dest='mask_val', default=0.2)
@@ -93,7 +95,7 @@ if __name__ == '__main__':
                                   min_batch_size=2000)
     #if options.use_orthographic_model == 1:
     #    print('MSE_ORTHOGRAPHIC_CLOZE mode 1')
-    #    cloze_model = MSE_ORTHOGRAPHIC_CLOZE(input_size=emb_dim,
+    #    simulation_model = MSE_ORTHOGRAPHIC_CLOZE(input_size=emb_dim,
     #                                         rnn_size=options.model_size,
     #                                         encoder=l1_encoder,
     #                                         nn_mapper=None,
@@ -105,7 +107,7 @@ if __name__ == '__main__':
     #    nn_mat = nn_mat[:, :options.nn_mat_size]
     #    nn_embedding = torch.nn.Embedding(nn_mat.shape[0], nn_mat.shape[1])
     #    nn_embedding.weight.data = nn_mat
-    #    cloze_model = MSE_ORTHOGRAPHIC_CLOZE(input_size=emb_dim,
+    #    simulation_model = MSE_ORTHOGRAPHIC_CLOZE(input_size=emb_dim,
     #                                         rnn_size=options.model_size,
     #                                         encoder=l1_encoder,
     #                                         nn_mapper=nn_embedding,
@@ -118,7 +120,7 @@ if __name__ == '__main__':
     nn_mapper.weight.data = nn_mat
     nn_mapper.requires_grad = False
     context_encoder = make_context_encoder(options.context_encoder_type, emb_dim, options.model_size, v2i[SPECIAL_TOKENS.PAD])
-    cloze_model = MSE_CLOZE(emb_dim,
+    simulation_model = MSE_CLOZE(emb_dim,
                             l1_encoder,
                             context_encoder,
                             v2i,
@@ -127,31 +129,34 @@ if __name__ == '__main__':
                             options.use_rand_hiddens,
                             nn_mapper=nn_mapper,
                             num_highways=options.num_highways,
-                            noise_profile=options.noise_profile)
+                            noise_profile=options.noise_profile,
+                            loss_at=options.loss_at)
 
     if options.gpuid > -1:
-        cloze_model.init_cuda()
+        simulation_model.init_cuda()
 
-    print(cloze_model)
+    print(simulation_model)
+    print(sum([p.numel() for p in simulation_model.parameters() if p.requires_grad]), ' learnable parameters')
+    print(sum([p.numel() for p in simulation_model.parameters()]), ' parameters')
     ave_time = 0.
     s = time.time()
     total_batches = 0  # train_dataset.num_batches
     mask_val = options.mask_val
     early_stops = []
     for epoch in range(options.epochs):
-        cloze_model.train()
+        simulation_model.train()
         train_losses = []
         train_accs = []
         for batch_idx, batch in enumerate(train_dataset):
             l, data, text_data = batch
             ind = data.ne(v2i[SPECIAL_TOKENS.PAD]).long()
             mask = make_random_mask(data, l, mask_val, v2i[SPECIAL_TOKENS.PAD])
-            if cloze_model.is_cuda():
+            if simulation_model.is_cuda():
                 data = data.cuda()
                 ind = ind.cuda()
                 mask = mask.cuda()
-            cuda_batch = l, data, data, ind, mask
-            loss, grad_norm, acc = cloze_model.do_backprop(cuda_batch)
+            cuda_batch = l, data, data, ind, mask #mask arg is not used.. TODO: remove it
+            loss, grad_norm, acc = simulation_model.do_backprop(cuda_batch)
             if batch_idx % 100 == 0 and batch_idx > 0:
                 e = time.time()
                 ave_time = (e - s) / 100.
@@ -171,20 +176,20 @@ if __name__ == '__main__':
         dev_losses = []
         dev_accs = []
         assert options.dev_corpus is not None
-        cloze_model.eval()
+        simulation_model.eval()
         print('completed epoch', epoch)
         for batch_idx, batch in enumerate(dev_dataset):
             l, data, text_data = batch
             mask = make_random_mask(data, l, mask_val, v2i[SPECIAL_TOKENS.PAD])
             ind = torch.ones_like(data).long()
-            if cloze_model.is_cuda():
+            if simulation_model.is_cuda():
                 data = data.cuda()
                 ind = ind.cuda()
                 mask = mask.cuda()
 
             cuda_batch = l, data, data, ind, mask
             with torch.no_grad():
-                _loss, acc = cloze_model(cuda_batch)
+                _loss, acc = simulation_model(cuda_batch)
                 loss = _loss.item()
                 del _loss
             dev_losses.append(loss)
@@ -204,7 +209,7 @@ if __name__ == '__main__':
                                                                                      dev_losses_mu,
                                                                                      dev_acc_mu)
         if options.save_folder is not None:
-            cloze_model.save_model(os.path.join(options.save_folder, save_name + '.model'))
+            simulation_model.save_model(os.path.join(options.save_folder, save_name + '.model'))
         if options.use_early_stop == 1:
             if epoch > 5 and dev_losses_mu > max(early_stops[-3:]):
                 print('early stopping...')

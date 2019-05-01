@@ -5,6 +5,8 @@ import sys
 import torch
 import random
 import numpy as np
+import pdb
+import os
 
 from src.models.mse_model import L2_MSE_CLOZE
 from src.models.mse_model import MSE_CLOZE
@@ -36,6 +38,7 @@ if __name__ == '__main__':
                      help='gloss vocab to index pickle obj')
     opt.add_argument('--gpuid', action='store', type=int, dest='gpuid', default=-1)
     opt.add_argument('--cloze_model', action='store', dest='cloze_model', required=True)
+    opt.add_argument('--l2_init_weights', action='store', dest='l2_init_weights', required=False, default="")
     opt.add_argument('--key', action='store', dest='key', required=True)
     opt.add_argument('--per_line_key', action='store', dest='per_line_key', required=True)
     opt.add_argument('--stochastic', action='store', dest='stochastic', default=0, type=int, choices=[0, 1])
@@ -46,8 +49,6 @@ if __name__ == '__main__':
     opt.add_argument('--binary_branching', action='store', dest='binary_branching',
                      default=0, type=int, choices=[0, 1, 2])
     opt.add_argument('--iters', action='store', dest='iters', type=int, required=True)
-    opt.add_argument('--training_loss_type', action='store', dest='training_loss_type',
-                     choices=['cs', 'cs_margin', 'mse', 'huber'], type=str, required=True)
     opt.add_argument('--penalty', action='store', dest='penalty', default=0.0, type=float)
     opt.add_argument('--verbose', action='store_true', dest='verbose', default=False)
     opt.add_argument('--reward', action='store', dest='reward_type', type=str, choices=['type_mrr_assist_check', 'token_mrr', 'token_ranking', 'mrr', 'ranking', 'cs'])
@@ -89,15 +90,17 @@ if __name__ == '__main__':
     g_max_vocab = len(gv2i)
     l1_cloze_model = torch.load(options.cloze_model, map_location=lambda storage, loc: storage)
     we_size = l1_cloze_model.encoder.weight.size(1)
-    if l1_cloze_model.train_mode == 0:
+    if os.path.basename(options.l2_init_weights) == "zero":
         print('using random l2_init_weights')
         l2_encoder = make_wl_encoder(g_max_vocab, we_size, None)
+        l2_encoder.weight.data[:] = 0.0
     else:
-        print('using FastText l2_init_weights')
+        print('using l2_init_weights from ' + options.l2_init_weights)
         l2_init_weights = torch.load(options.l2_init_weights)
         l2_encoder = make_wl_encoder(None, None, l2_init_weights)
+        pdb.set_trace()
     cloze_model = L2_MSE_CLOZE(encoder=l1_cloze_model.encoder,
-                               rnn=l1_cloze_model.rnn,
+                               context_encoder=l1_cloze_model.context_encoder,
                                highway_ff=l1_cloze_model.highway_ff,
                                l1_dict=l1_cloze_model.l1_dict,
                                l2_encoder=l2_encoder,
@@ -105,8 +108,7 @@ if __name__ == '__main__':
                                l1_key=l1_key,
                                l2_key=l2_key,
                                iters=options.iters,
-                               loss_type=options.training_loss_type,
-                               train_mode=l1_cloze_model.train_mode)
+                               ortho_mode=l1_cloze_model.ortho_mode)
     if options.gpuid > -1:
         cloze_model.init_cuda()
     cloze_model.init_key()
