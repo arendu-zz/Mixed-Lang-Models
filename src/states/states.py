@@ -3,6 +3,7 @@ __author__ = 'arenduchintala'
 import copy
 import random
 import json
+from collections import OrderedDict
 
 from src.utils.utils import TEXT_EFFECT
 from pylatexenc.latexencode import utf8tolatex
@@ -81,7 +82,7 @@ class MacaronicState(object):
         s.append('swap_types       :' + str(self.swap_type_counts))
         s.append('swap_token_count:' + str(self.swap_token_counts))
         s.append('possible_children:' + str(len(actions)))
-        s.append('weightid         :' + str(id(self.weights)))
+        s.append('weightid         :' + ' '.join([str(id(v)) for k, v in self.weights.items()]))
         s.append('is_terminal      :' + str(self.terminal))
         s.append('start_score       :' + str(self.start_score))
         s.append('score            :' + str(self.score))
@@ -135,7 +136,9 @@ class MacaronicState(object):
                            self.model,
                            self.start_score,
                            self.binary_branching)
-        c.weights = self.weights
+        c.weights = OrderedDict()
+        for k, v in self.weights.items():
+            c.weights[k] = v.clone()
         c.score = self.score
         c.swap_token_counts = self.swap_token_counts
         return c

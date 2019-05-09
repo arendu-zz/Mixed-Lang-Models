@@ -75,6 +75,6 @@ python $PROJECT_DIR/search_mse.py \
   --max_sentences $MAX_SENT \
   --accumulate_seen_l2 $ACCUMLUATE_SEEN_L2 \
   --search_output_prefix  ${SAVE_DIR}/$NAME \
-  --verbose $VERBOSE > ${SAVE_DIR}/$NAME.log 2> ${SAVE_DIR}/$NAME.err
+  --verbose $VERBOSE #> ${SAVE_DIR}/$NAME.log 2> ${SAVE_DIR}/$NAME.err
 #source /home/arenduc1/anaconda3/bin/deactivate
 #echo "file:${SAVE_DIR}/${NAME}.log" | mail -s "mse-macaronic-search: $NAME" adithya.renduchintala@jhu.edu

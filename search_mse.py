@@ -8,6 +8,7 @@ import torch
 import random
 import json
 import os
+from collections import OrderedDict
 import pdb
 
 
@@ -77,6 +78,7 @@ def nearest_neighbors(l1_weights, l2_weights, l2, l1_dict_idx, l2_dict_idx, rank
 
 def apply_swap(macaronic_config, model, weights, previous_seen_l2, **kwargs):
     assert isinstance(macaronic_config, MacaronicSentence)
+    #print(macaronic_config)
     l1_data = macaronic_config.int_l1.clone()
     l2_data = macaronic_config.int_l2.clone()
     swap_ind = torch.LongTensor(sorted(list(macaronic_config.swapped)))
@@ -94,48 +96,48 @@ def apply_swap(macaronic_config, model, weights, previous_seen_l2, **kwargs):
         indicator = indicator.cuda()
         mask = indicator.cuda()  # NOT used in search...
     var_batch = [l1_data.size(1)], l1_data, l2_data, indicator, mask
-    model.set_l2_weights(weights)
-    #print('set weights', weights.sum().item())
+    model.set_l2_state_dict(weights)
     reward_type = kwargs.get('reward_type', None)
     use_per_line_key = kwargs.get('use_per_line_key', 0)
     rank_threshold = kwargs.get('rank_threshold', 10)
+    #print('before_weights', model.get_l2_word_vecs().sum().item())
     model.learn_step(var_batch)
-    #print('learned weights', model.get_l2_weights().sum().item())
+    #print('leaned_weights', model.get_l2_word_vecs().sum().item())
     l2_idxs = indicator.eq(2).long()
     if reward_type == 'ranking':
-        score = rank_score_embeddings(model.get_l2_weights(), # l2_encoder.weight.data.clone(),
-                                      model.get_l1_weights(), # model.encoder.weight.data.clone(),
+        score = rank_score_embeddings(model.get_l2_word_vecs(), # l2_encoder.weight.data.clone(),
+                                      model.get_l1_word_vecs(), # model.encoder.weight.data.clone(),
                                       macaronic_config.l2_key if use_per_line_key else model.l2_key,
                                       macaronic_config.l1_key if use_per_line_key else model.l1_key)
     elif reward_type == 'mrr':
-        score = mrr_score_embeddings(model.get_l2_weights(), # l2_encoder.weight.data.clone(),
-                                     model.get_l1_weights(), # model.encoder.weight.data.clone(),
+        score = mrr_score_embeddings(model.get_l2_word_vecs(), # l2_encoder.weight.data.clone(),
+                                     model.get_l1_word_vecs(), # model.encoder.weight.data.clone(),
                                      macaronic_config.l2_key if use_per_line_key else model.l2_key,
                                      macaronic_config.l1_key if use_per_line_key else model.l1_key,
                                      rank_threshold)
 
     elif reward_type == 'cs':
-        score = score_embeddings(model.get_l2_weights(), # l2_encoder.weight.data.clone(),
-                                 model.get_l1_weights(), # model.encoder.weight.data.clone(),
+        score = score_embeddings(model.get_l2_word_vecs(), # l2_encoder.weight.data.clone(),
+                                 model.get_l1_word_vecs(), # model.encoder.weight.data.clone(),
                                  macaronic_config.l2_key if use_per_line_key else model.l2_key,
                                  macaronic_config.l1_key if use_per_line_key else model.l1_key)
     elif reward_type == 'token_ranking':
-        score = token_rank_score_embeddings(model.get_l2_weights(),  # l2_encoder.weight.data.clone(),
-                                            model.get_l1_weights(), # model.encoder.weight.data.clone(),
+        score = token_rank_score_embeddings(model.get_l2_word_vecs(),  # l2_encoder.weight.data.clone(),
+                                            model.get_l1_word_vecs(), # model.encoder.weight.data.clone(),
                                             l2_data.clone(),
                                             l1_data.clone(),
                                             l2_idxs,
                                             rank_threshold)
     elif reward_type == 'token_mrr':
-        score = token_mrr_score_embeddings(model.get_l2_weights(), # l2_encoder.weight.data.clone(),
-                                           model.get_l1_weights(), # model.encoder.weight.data.clone(),
+        score = token_mrr_score_embeddings(model.get_l2_word_vecs(), # l2_encoder.weight.data.clone(),
+                                           model.get_l1_word_vecs(), # model.encoder.weight.data.clone(),
                                            l2_data.clone(),
                                            l1_data.clone(),
                                            l2_idxs,
                                            rank_threshold)
     elif reward_type == "type_mrr_assist_check":
-        score = mmr_score_embedding_with_assist_check(model.get_l2_weights(), # l2_encoder.weight.data.clone(),
-                                                      model.get_l1_weights(), # model.encoder.weight.data.clone(),
+        score = mmr_score_embedding_with_assist_check(model.get_l2_word_vecs(), # l2_encoder.weight.data.clone(),
+                                                      model.get_l1_word_vecs(), # model.encoder.weight.data.clone(),
                                                       model.l2_key,
                                                       model.l1_key,
                                                       l2_data.clone(),
@@ -145,12 +147,13 @@ def apply_swap(macaronic_config, model, weights, previous_seen_l2, **kwargs):
                                                       model.l2_key_wt)
     else:
         raise BaseException("unknown reward_type")
-    new_weights = model.get_l2_weights()
+    new_weights = model.get_l2_state_dict()
+    #print('new_weights', sum([p.sum().item() for p in new_weights.values()]))
+    #print('new_score', score)
     nn = None  # get_nn(model, macaronic_config, seen_l2)
     swap_result = {'score': score - (kwargs['penalty'] * (len(seen_l2) - 1)),
                    'weights': new_weights,
                    'neighbors': nn}
-    #print(swap_result)
     return swap_result
 
 
@@ -211,7 +214,6 @@ def beam_search_per_sentence(search_file, guesses_file, json_file, latex_file, m
                 #print('new best state')
                 best_state = curr_state
                 #print(best_state)
-                #pdb.set_trace()
             actions, action_weights = curr_state.possible_actions()
             for action in actions:  # sorted(zip(action_weights, actions), reverse=True):
                 if action == NEXT_SENT:
@@ -238,8 +240,8 @@ def beam_search_per_sentence(search_file, guesses_file, json_file, latex_file, m
             actions, action_weights = best_state.possible_actions()
             assert NEXT_SENT in actions, "oops" + str(actions)
             init_next_sentence_state = best_state.next_state(NEXT_SENT, apply_swap, **kwargs)
-            l1_weights = model.get_l1_weights() # encoder.weight.data.detach().clone()
-            l2_weights = init_next_sentence_state.weights.detach().clone()
+            l1_weights = model.get_l1_word_vecs() # encoder.weight.data.detach().clone()
+            l2_weights = init_next_sentence_state.model.get_l2_word_vecs() #.weights.detach().clone()
             nn, nn_dict = nearest_neighbors(l1_weights, l2_weights, l2, model.l1_dict_idx, model.l2_dict_idx, kwargs['rank_threshold'])
             print(nn)
             for w in obj_list:
@@ -388,10 +390,10 @@ if __name__ == '__main__':
     print('total params', sum([p.numel() for p in cloze_model.parameters()]))
     print('trainable params', sum([p.numel() for p in cloze_model.parameters() if p.requires_grad]))
     macaronic_sents = []
-    weights = cloze_model.get_l2_weights()
-    init_weights = weights.clone()
+    init_weights = cloze_model.get_l2_state_dict()
     kwargs = vars(options)
     start_state = make_start_state(v2i, gv2i, i2v, i2gv, init_weights, cloze_model, dataset, **kwargs)
+    pdb.set_trace()
     now = time.time()
     best_state = beam_search_per_sentence(search_output,
                                           search_output_guesses,
@@ -403,8 +405,8 @@ if __name__ == '__main__':
     print(str(best_state))
     _, all_swapped_types = best_state.swap_counts()
     print('num_exposed', len(all_swapped_types))
-    l1_weights = cloze_model.get_l1_weights() # encoder.weight.data.detach().clone()
-    l2_weights = best_state.weights.detach().clone()
+    l1_weights = cloze_model.get_l1_word_vecs() # encoder.weight.data.detach().clone()
+    l2_weights = best_state.model.get_l2_word_vecs() #.weights.detach().clone()
     nn, nn_dict = nearest_neighbors(l1_weights, l2_weights,
                                     all_swapped_types,
                                     cloze_model.l1_dict_idx, cloze_model.l2_dict_idx, kwargs['rank_threshold'])

@@ -15,6 +15,8 @@ from src.models.ce_model import TiedEncoderDecoder, CharTiedEncoderDecoder
 from src.models.ce_model import ClozeContextEncoder, ClozeMaskContextEncoder, LMContextEncoder
 from src.models.model_untils import make_context_encoder
 
+import pdb
+
 
 def do_dev_batch(model, dev_data, nsc, prev_dev_acc_mu):
     assert options.dev_corpus is not None
@@ -90,10 +92,14 @@ if __name__ == '__main__':
                      dest='checkpoint_freq', type=int, default=10)
     opt.add_argument('--char_aware', action='store', required=False, choices=[0, 1],
                      dest='char_aware', type=int, default=0)
+    opt.add_argument('--pool_type', action='store', choices=['None', 'RNN', 'CNNAvg', 'CNNMax', 'CNNLP'],
+                     dest='pool_type', type=str)
+    opt.add_argument('--lang_bit_ratio', action='store', dest='lang_bit_ratio', type=float)
     opt.add_argument('--vmat', action='store', dest='vmat', required=True,
                      help='l1 word embeddings')
     options = opt.parse_args()
     print(options)
+    assert 0.0 <= options.lang_bit_ratio <= 1.0, " lang_bit_ratio should be [0,1.0]"
     torch.manual_seed(options.seed)
     random.seed(options.seed)
     np.random.seed(options.seed)
@@ -130,15 +136,19 @@ if __name__ == '__main__':
         spelling_mat = spelling_mat[:, :-1] # throw away length of spelling because we going to use cnns
         assert vocab_size == spelling_mat.shape[0]
         tied_encoder_decoder = CharTiedEncoderDecoder(char_vocab_size=len(c2i),
-                                                      char_embedding_size=19,
+                                                      char_embedding_size=options.embedding_size,
                                                       word_vocab_size=vocab_size,
                                                       word_embedding_size=options.embedding_size,
                                                       spelling_mat=spelling_mat,
-                                                      mode='l1')
+                                                      mode='l1',
+                                                      pool=options.pool_type,
+                                                      num_lang_bits=int(options.embedding_size * options.lang_bit_ratio))
+        tied_encoder_decoder.param_type = 'l1'
     else:
         tied_encoder_decoder = TiedEncoderDecoder(vocab_size=vocab_size,
                                                   embedding_size=options.embedding_size,
                                                   mode='l1', vmat=vmat)
+        tied_encoder_decoder.param_type = 'l1'
 
     train_dataset = TextDataset(options.train_corpus, v2i, shuffle=True, sort_by_len=True,
                                 min_batch_size=options.batch_size)
@@ -170,8 +180,10 @@ if __name__ == '__main__':
         simulation_model.init_cuda()
 
     print(simulation_model)
+    for n, p in simulation_model.named_parameters():
+        print(n, p.requires_grad)
     print(sum([p.numel() for p in simulation_model.parameters() if p.requires_grad]), ' learnable parameters')
-    print(sum([p.numel() for p in simulation_model.parameters()]), ' parameters')
+    print(sum([p.numel() for p in simulation_model.parameters()]), ' parameters ( if char_aware spelling_mat is not learnable)')
     ave_time = 0.
     s = time.time()
     total_batches = 0  # train_dataset.num_batches

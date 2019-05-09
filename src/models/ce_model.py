@@ -3,6 +3,7 @@ __author__ = 'arenduchintala'
 import math
 import torch
 import torch.nn as nn
+from collections import OrderedDict
 
 from src.models.model_untils import BiRNNConextEncoder
 from src.models.model_untils import SelfAttentionalContextEncoder
@@ -31,24 +32,26 @@ def make_l2_tied_encoder_decoder(l1_tied_enc_dec,
         for k, v in v2spell.items():
             spelling_mat[k] = torch.tensor(v)
         spelling_mat = spelling_mat[:, :-1] # throw away length of spelling because we going to use cnns
-        l2_tied_encoder_decoder = CharTiedEncoderDecoder(char_vocab_size=len(gc2i),
-                                                         char_embedding_size=l1_tied_enc_dec.char_embedding.embedding_dim,
-                                                         word_vocab_size=len(g2i),
-                                                         word_embedding_size=l1_tied_enc_dec.word_embedding_size,
-                                                         spelling_mat=spelling_mat,
-                                                         mode='l2')
-        #TODO: match the char_embs
-        #TODO: copy params of the cnn
-        pdb.set_trace()
-        return l2_tied_encoder_decoder
+        l2_tied_enc_dec = CharTiedEncoderDecoder(char_vocab_size=len(gc2i),
+                                                 char_embedding_size=l1_tied_enc_dec.char_embedding.embedding_dim,
+                                                 word_vocab_size=len(g2i),
+                                                 word_embedding_size=l1_tied_enc_dec.word_embedding_size,
+                                                 spelling_mat=spelling_mat,
+                                                 mode='l2',
+                                                 pool=l1_tied_enc_dec.pool_type,
+                                                 num_lang_bits=l1_tied_enc_dec.num_lang_bits)
+        l2_tied_enc_dec.match_char_emb_params(c2i, gc2i, l1_tied_enc_dec.char_embedding)
+        l2_tied_enc_dec.match_seq_params(l1_tied_enc_dec.seq)
+        l2_tied_enc_dec.param_type = 'l2'
+        return l2_tied_enc_dec
     elif isinstance(l1_tied_enc_dec, TiedEncoderDecoder):
-        l2_tied_encoder_decoder = TiedEncoderDecoder(vocab_size=len(g2i),
-                                                     embedding_size=l1_tied_enc_dec.embedding.embedding_dim,
-                                                     mode='l2',
-                                                     vmat=None)
-        l2_tied_encoder_decoder.embedding.weight.data.uniform_(-0.01, 0.01)
-        #pdb.set_trace()
-        return l2_tied_encoder_decoder
+        l2_tied_enc_dec = TiedEncoderDecoder(vocab_size=len(g2i),
+                                             embedding_size=l1_tied_enc_dec.embedding.embedding_dim,
+                                             mode='l2',
+                                             vmat=None)
+        l2_tied_enc_dec.embedding.weight.data.uniform_(-0.01, 0.01)
+        l2_tied_enc_dec.param_type = 'l2'
+        return l2_tied_enc_dec
     else:
         raise NotImplementedError("unknown tied_encoder_decoder")
 
@@ -57,6 +60,8 @@ class TiedEncoderDecoder(nn.Module):
     def __init__(self, vocab_size, embedding_size, mode, vmat=None):
         super().__init__()
         self.mode = mode
+        self.vocab_size = vocab_size
+        self.embedding_size = embedding_size
         self.mode in ['l1', 'l2']
         self.embedding = torch.nn.Embedding(vocab_size, embedding_size)
         self.embedding.weight.data.normal_(0, 1.0)
@@ -67,21 +72,25 @@ class TiedEncoderDecoder(nn.Module):
             self.pretrained = False
         self.decoder = torch.nn.Linear(embedding_size, vocab_size, bias=False)
         self.decoder.weight = self.embedding.weight
+        self.param_type = ''
 
-    def init_param_freeze(self, weight_type):
+    def vocab_size(self,):
+        return self.embedding.num_embeddings
+
+    def init_param_freeze(self,):
         if self.mode == 'l1':
-            if weight_type == 'l1':
+            if self.param_type == 'l1':
                 self.embedding.weight.requres_grad = True and not self.pretrained
             else:
                 raise NotImplementedError("weight type should only be l1 in mode=l1")
         else:
             assert not self.pretrained
-            if weight_type == 'l1':
+            if self.param_type == 'l1':
                 self.embedding.weight.requires_grad = False
-            elif weight_type == 'l2':
+            elif self.param_type == 'l2':
                 self.embedding.weight.requires_grad = True
             else:
-                raise NotImplementedError("unknown weight_type/mode combination")
+                raise NotImplementedError("unknown param_type/mode combination")
         return True
 
     def embedding_dim(self,):
@@ -102,123 +111,204 @@ class TiedEncoderDecoder(nn.Module):
     def is_cuda(self,):
         return self.embedding.weight.data.is_cuda
 
-    def get_weight(self, on_device=True):
+    def get_word_vecs(self, on_device=True):
         if on_device:
             weights = self.embedding.weight.data.clone().detach()
         else:
             weights = self.embedding.weight.data.clone().detach().cpu()
         return weights
 
-    def get_params(self,):
-        return self.get_weight()
+    def get_state_dict(self,):
+        sd = OrderedDict()
+        for k, v in self.embedding.state_dict().items():
+            sd[k] = v.clone()
+        return sd
 
-    def set_params(self, new_params):
-        self.embedding.weight.data = new_params.clone()
+    def set_state_dict(self, new_state_dict):
+        self.embedding.load_state_dict(new_state_dict)
         self.decoder.weight = self.embedding.weight
         return True
+
+    def get_undetached_state_dict(self,):
+        return self.embedding.named_parameters()
 
     def get_weight_without_detach(self,):
         return self.embedding.weight
 
     def regularized_step(self, new_params):
+        raise BaseException("don't regularize here, use l2 regularize instead")
         #self.l2_encoder.weight.data = 0.3 * l2_encoder_cpy + 0.7 * self.l2_encoder.weight.data
         self.set_params(0.3 * new_params + 0.7 * self.get_params())
         return True
 
 
 class CharTiedEncoderDecoder(nn.Module):
-    def __init__(self, char_vocab_size, char_embedding_size,
-                 word_vocab_size, word_embedding_size, spelling_mat, mode):
+    def __init__(self, char_vocab_size, char_embedding_size, num_lang_bits,
+                 word_vocab_size, word_embedding_size, spelling_mat, mode, pool):
         super().__init__()
         self.mode = mode
+        self.pool_type = pool
         assert self.mode in ['l1', 'l2']
         self.word_vocab_size = word_vocab_size
         self.word_embedding_size = word_embedding_size
         self.char_embedding_size = char_embedding_size
-        self.num_chars = spelling_mat.shape[1]
-        self.spelling_embedding = torch.nn.Embedding(word_vocab_size, self.num_chars)
+        self.max_spelling_length = spelling_mat.shape[1]
+        self.spelling_embedding = torch.nn.Embedding(word_vocab_size, self.max_spelling_length)
         self.spelling_embedding.weight.data = spelling_mat
         self.spelling_embedding.weight.requires_grad = False
         self.char_embedding = torch.nn.Embedding(char_vocab_size, char_embedding_size)
+        self.num_lang_bits = num_lang_bits
+        self.param_type = ''
+        ##self.char_embedding.weight.data.uniform_(-0.01, 0.01)
+        self.use_cache_embedding = False
         self.char_embedding.weight.data.normal_(0, 1.0)
-        ks = 4
-        self.cnn = nn.Conv1d(self.char_embedding_size + 1, self.word_embedding_size,
-                             kernel_size=ks, padding=0, bias=False)
-        self.mp = nn.MaxPool1d(self.num_chars - (ks - 1))
-        # approximating many smaller kernel sizes with one large kernel by zeroing out kernel elements
-        _k = self.word_embedding_size // ks
-        for i in range(1, ks):
-            x = torch.Tensor(_k, self.char_embedding_size + 1, ks).uniform_(-0.05, 0.05)
-            x[:, :, torch.arange(i, ks).long()] = 0
-            self.cnn.weight.data[torch.arange((i - 1) * _k, i * _k).long(), :, :] = x
+        self.dropout = nn.Dropout(0.1)
+        if self.pool_type.startswith('CNN'):
+            ks = 4
+            cnn = nn.Conv1d(self.char_embedding_size + self.num_lang_bits, self.word_embedding_size,
+                            kernel_size=ks, padding=0, bias=False)
+            # approximating many smaller kernel sizes with one large kernel by zeroing out kernel elements
+            _k = self.word_embedding_size // ks
+            for i in range(1, ks):
+                x = torch.Tensor(_k, self.char_embedding_size + self.num_lang_bits, ks).uniform_(-0.05, 0.05)
+                x[:, :, torch.arange(i, ks).long()] = 0
+                cnn.weight.data[torch.arange((i - 1) * _k, i * _k).long(), :, :] = x
+            if self.pool_type.startswith('CNNAvg'):
+                mp = nn.AvgPool1d(2, self.max_spelling_length - (ks - 1))
+            elif self.pool_type.startswith('CNNMax'):
+                mp = nn.MaxPool1d(2, self.max_spelling_length - (ks - 1))
+            elif self.pool_type.startswith('CNNLP'):
+                mp = nn.LPPool1d(2, self.max_spelling_length - (ks - 1))
+            else:
+                raise BaseException("unknown pool_type")
+            self.seq = nn.Sequential(cnn, mp)
+        elif self.pool_type.startswith('RNN'):
+            self.seq = nn.LSTM(input_size=self.char_embedding_size + self.num_lang_bits,
+                               hidden_size=self.word_embedding_size,
+                               num_layers=1,
+                               batch_first=True)
+        else:
+            raise BaseException("unknown pool_type")
+
+    def init_cache(self,):
+        word_emb = self._compute_word_embeddings().detach()
+        self.cached_word_embedding = nn.Embedding(self.word_vocab_size, self.word_embedding_size)
+        self.cached_word_embedding.weight.data = word_emb
+        self.cached_word_embedding_decoder = torch.nn.Linear(self.word_embedding_size,
+                                                             self.word_vocab_size,
+                                                             bias=False)
+        self.cached_word_embedding_decoder.weight = self.cached_word_embedding.weight
+        self.use_cache_embedding = True
+        return True
+
+    def match_char_emb_params(self, c2i, gc2i, char_embs):
+        char_embs = char_embs.weight.clone().detach()
+        for gc, gc_i in gc2i.items():
+            ci = c2i.get(gc, c2i[SPECIAL_TOKENS.UNK_C])
+            self.char_embedding.weight.data[gc_i, :] = char_embs[ci, :]
+        return True
+
+    def match_seq_params(self, seq_from_l1):
+        self.seq.load_state_dict(seq_from_l1.state_dict())
+        return True
 
     def embedding_dim(self,):
         return self.word_embedding_size
 
-    def init_param_freeze(self, weight_type):
+    def vocab_size(self,):
+        return self.word_vocab_size
+
+    def init_param_freeze(self, ):
         if self.mode == 'l1':
-            if weight_type == 'l1':
-                self.char_embedding.weight.requires_grad = True
-                self.cnn.weight.requires_grad = True
+            if self.param_type == 'l1':
+                for n, p in self.named_parameters():
+                    if n != 'spelling_embedding.weight':
+                        p.requires_grad = True
             else:
                 raise NotImplementedError("weight type should only be l1 in mode=l1")
         else:
-            if weight_type == 'l1':
-                self.char_embedding.weight.requires_grad = False
-                self.cnn.weight.requires_grad = False
-            elif weight_type == 'l2':
-                self.char_embedding.weight.requires_grad = True
-                self.cnn.weight.requires_grad = True
+            if self.param_type == 'l1':
+                for p in self.parameters():
+                    p.requires_grad = False
+            elif self.param_type == 'l2':
+                for n, p in self.named_parameters():
+                    if n != 'spelling_embedding.weight':
+                        p.requires_grad = True
             else:
-                raise NotImplementedError("unknown weight_type/mode combination")
+                raise NotImplementedError("unknown param_type/mode combination")
         self.spelling_embedding.weight.requires_grad = False
         return True
 
     def input_forward(self, data):
         #data shape = (bsz, seqlen)
-        spelling = self.spelling_embedding(data).long()
-        # spelling shape = (bsz, seqlen, num_chars)
-        char_emb = self.char_embedding(spelling)
-        bsz, seq_len, num_chars, char_emb_size = char_emb.shape
-        # char_emb shape = (bsz, seqlen, num_chars, char_emb_size)
-        char_emb = char_emb.view(-1, num_chars, char_emb_size)
-        # char_emb shape = (bsz * seqlen, num_chars, char_emb_sze)
-        lang_bit = torch.ones(1, 1, 1).type_as(char_emb).expand(char_emb.shape[0], char_emb.shape[1], 1)
-        lang_bit = lang_bit * 1 if self.mode == 'l2' else lang_bit * 0
-        char_emb = torch.cat([char_emb, lang_bit], dim=2)
-        char_emb = char_emb.transpose(1, 2)
-        # char_emb shape = (bsz * seq_len, char_emb_size + 1, num_chars)
-        word_emb = self.mp(self.cnn(char_emb)).squeeze(2)
-        #word_emb shape = (bsz * seq_len, word_emb_size)
-        word_emb = word_emb.view(bsz, seq_len, -1)
+        if self.use_cache_embedding:
+            word_emb = self.cached_word_embedding(data)
+        else:
+            spelling = self.spelling_embedding(data).long()
+            # spelling shape = (bsz, seqlen, max_spelling_length)
+            char_emb = self.char_embedding(spelling)
+            if self.mode == 'l1' and self.param_type == 'l1':
+                char_emb = self.dropout(char_emb)
+            bsz, seq_len, max_spelling_length, char_emb_size = char_emb.shape
+            # char_emb shape = (bsz, seqlen, max_spelling_length, char_emb_size)
+            char_emb = char_emb.view(-1, max_spelling_length, char_emb_size)
+            # char_emb shape = (bsz * seqlen, max_spelling_length, char_emb_sze)
+            if self.num_lang_bits > 0:
+                lang_bits = torch.ones(1, 1, 1).type_as(char_emb).expand(char_emb.shape[0],
+                                                                         char_emb.shape[1],
+                                                                         self.num_lang_bits)
+                lang_bits = lang_bits * 1 if self.param_type == 'l2' else lang_bits * 0
+                char_emb = torch.cat([char_emb, lang_bits], dim=2)
+            else:
+                pass
+            # char_emb shape = (bsz * seq_len, char_emb_size + 1, max_spelling_length)
+            if self.pool_type.startswith('RNN'):
+                _, (hn, cn) = self.seq(char_emb)
+                word_emb = hn.squeeze(0) #out[:, -1, :]
+                #assert (word_emb - out[:, -1, :]).sum().item() == 0
+                #word_emb shape = (bsz * seq_len, word_emb_size)
+            else:
+                char_emb = char_emb.transpose(1, 2)
+                word_emb = self.seq(char_emb).squeeze(2)
+                #word_emb shape = (bsz * seq_len, word_emb_size)
+            word_emb = word_emb.view(bsz, seq_len, -1)
+            #if self.mode == 'l1' and self.param_type == 'l1':
+            if self.mode == 'l1' and self.param_type == 'l1':
+                word_emb = self.dropout(word_emb)
         return word_emb
 
     def _compute_word_embeddings(self,):
         spelling = self.spelling_embedding.weight.data.clone().detach().long()
-        # spelling shape = (v, num_chars)
+        # spelling shape = (v, max_spelling_length)
         char_emb = self.char_embedding(spelling)
-        #v, num_chars, char_emb_size = char_emb.shape
-        lang_bit = torch.ones(1, 1, 1).type_as(char_emb).expand(char_emb.shape[0], char_emb.shape[1], 1)
-        lang_bit = lang_bit * 1 if self.mode == 'l2' else lang_bit * 0
-        char_emb = torch.cat([char_emb, lang_bit], dim=2)
-        char_emb = char_emb.transpose(1, 2)
-        word_emb = self.mp(self.cnn(char_emb)).squeeze(2)
+        if self.mode == 'l1' and self.param_type == 'l1':
+            char_emb = self.dropout(char_emb)
+        #v, max_spelling_length, char_emb_size = char_emb.shape
+        if self.num_lang_bits > 0:
+            lang_bits = torch.ones(1, 1, 1).type_as(char_emb).expand(char_emb.shape[0],
+                                                                     char_emb.shape[1],
+                                                                     self.num_lang_bits)
+            lang_bits = lang_bits * 1 if self.param_type == 'l2' else lang_bits * 0
+            char_emb = torch.cat([char_emb, lang_bits], dim=2)
+        else:
+            pass
+
+        if self.pool_type.startswith('RNN'):
+            _, (hn, cn) = self.seq(char_emb)
+            word_emb = hn.squeeze(0)
+        else:
+            char_emb = char_emb.transpose(1, 2)
+            word_emb = self.seq(char_emb).squeeze(2)
+        if self.mode == 'l1' and self.param_type == 'l1':
+            word_emb = self.dropout(word_emb)
         return word_emb
 
     def output_forward(self, data):
-        v = torch.arange(self.word_vocab_size).type_as(data).long()
-        spelling = self.spelling_embedding(v).long()
-        # spelling shape = (v, num_chars -1)
-        char_emb = self.char_embedding(spelling)
-        #v, num_chars, char_emb_size = char_emb.shape
-        lang_bit = torch.ones(1, 1, 1).type_as(char_emb).expand(char_emb.shape[0], char_emb.shape[1], 1)
-        lang_bit = lang_bit * 1 if self.mode == 'l2' else lang_bit * 0
-        char_emb = torch.cat([char_emb, lang_bit], dim=2)
-        char_emb = char_emb.transpose(1, 2)
-        word_emb = self.mp(self.cnn(char_emb)).squeeze(2)
-        #word_emb shape = (v, word_emb_size)
-        #return self.__decoder(data)
-        return torch.matmul(data, word_emb.transpose(0, 1))
+        if self.use_cache_embedding:
+            return self.cached_word_embedding_decoder(data)
+        else:
+            word_emb = self._compute_word_embeddings()
+            return torch.matmul(data, word_emb.transpose(0, 1))
 
     def forward(self, data, mode):
         if mode == 'input':
@@ -235,7 +325,7 @@ class CharTiedEncoderDecoder(nn.Module):
     def is_cuda(self,):
         return self.char_embedding.weight.data.is_cuda
 
-    def get_weight(self, on_device=True):
+    def get_word_vecs(self, on_device=True):
         weights = self._compute_word_embeddings().detach().clone()
         if on_device:
             pass
@@ -243,20 +333,23 @@ class CharTiedEncoderDecoder(nn.Module):
             weights = weights.cpu()
         return weights
 
-    def get_params(self,):
+    def get_undetached_state_dict(self,):
         return self.named_parameters()
 
-    def set_params(self, new_params):
-        for n, p in self.named_parameters():
-            for _n, _p in new_params:
-                if _n == n:
-                    p.data = _p.data
+    def get_state_dict(self,):
+        sd = OrderedDict()
+        for k, v in self.state_dict().items():
+            sd[k] = v.clone()
+        return sd
+
+    def set_state_dict(self, new_state_dict):
+        self.load_state_dict(new_state_dict)
         return True
 
     def regularized_step(self, new_params):
+        raise BaseException("don't regularize here, use l2 regularize instead")
         self.set_params(0.9 * new_params + 0.1 * self.get_params())
         return True
-
 
 
 class ContextEncoder(nn.Module):
@@ -443,7 +536,7 @@ class CE_CLOZE(nn.Module):
     def init_param_freeze(self,):
         for n, p in self.context_encoder.named_parameters():
             p.requires_grad = True
-        self.tied_encoder_decoder.init_param_freeze(weight_type='l1')
+        self.tied_encoder_decoder.init_param_freeze()
         for n, p in self.named_parameters():
             print(n, p.requires_grad)
         return True
@@ -580,6 +673,11 @@ class L2_CE_CLOZE(nn.Module):
         self.learning_steps = learning_steps
         self.learn_step_regularization = learn_step_regularization
         assert self.learn_step_regularization >= 0.0
+        #self.optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.parameters()), lr=0.1)
+        #self.optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()))
+        self.init_optimizer()
+
+    def init_optimizer(self,):
         self.optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.parameters()), lr=0.1)
         #self.optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()))
 
@@ -618,12 +716,6 @@ class L2_CE_CLOZE(nn.Module):
         raise NotImplementedError("todo...")
         return True
 
-    #def inspect_weights(self, l2):
-    #    arg_top_seen, cs_top_seen = get_nearest_neighbors(self.l2_encoder.weight.data,
-    #                                                      self.l1_encoded.weight.data,
-    #                                                      l2, 5)
-    #    pass
-
     def forward(self, batch):
         lengths, l1_data, l2_data, ind, _ = batch
         l1_idxs = ind.eq(1).long()
@@ -639,8 +731,9 @@ class L2_CE_CLOZE(nn.Module):
         l2_encoded = self.l2_tied_encoder_decoder(l2_data, mode='input')
         mixed_encoded = self.mix_inputs(l1_encoded, l2_encoded, l1_idxs, l2_idxs)
         j_data = l1_data.clone()
-        j_data[l2_idxs == 1] = l2_data[l2_idxs == 1] + self.l1_tied_encoder_decoder.embedding.num_embeddings
+        j_data[l2_idxs == 1] = l2_data[l2_idxs == 1] + self.l1_tied_encoder_decoder.vocab_size()
         hidden = self.context_encoder(mixed_encoded, lengths, forward_mode='L2')
+        #pdb.set_trace()
         out_l1 = self.l1_tied_encoder_decoder(hidden, mode='output')
         out_l2 = self.l2_tied_encoder_decoder(hidden, mode='output')
         l2_mask = torch.ones(out_l2.size(2)).type_as(l2_data)
@@ -651,23 +744,32 @@ class L2_CE_CLOZE(nn.Module):
         return loss
 
     def regularized_step(self, l2_cpy):
+        raise BaseException("not using this...")
         self.l2_tied_encoder_decoder.regularized_step(l2_cpy)
         return True
 
     def learn_step(self, batch):
-        l2_cpy = self.l2_tied_encoder_decoder.get_params()
+        #old_l2_cpy = self.l2_tied_encoder_decoder.get_word_vecs()
+        l2_cpy = self.l2_tied_encoder_decoder.get_state_dict()
+        self.init_optimizer()
         for _ in range(self.learning_steps):
             self.optimizer.zero_grad()
             loss = self(batch)
-            l2_regularized = ((l2_cpy - self.l2_tied_encoder_decoder.get_weight_without_detach()) ** 2).sum()
+            #l2_regularized = ((old_l2_cpy - self.l2_tied_encoder_decoder.get_weight_without_detach()) ** 2).sum()
+            l2_regularized = 0
+            for n, p in self.l2_tied_encoder_decoder.get_undetached_state_dict():
+                if p.requires_grad:
+                    l2_regularized = l2_regularized + torch.nn.functional.mse_loss(p, l2_cpy[n], reduction='sum')
+                else:
+                    pass
+            #print('%.2f' % (old_l2_regularized - l2_regularized).sum().item(), 'REGS!!!!!!!!!!!!!!!')
             final_loss = loss + (self.learn_step_regularization * l2_regularized)
             #print(_, final_loss.item(), loss.item(), l2_regularized.item(), self.learn_step_regularization)
             final_loss.backward()
             #print([p.grad.sum() if p.grad is not None else 'none' for n, p in self.named_parameters()])
             self.optimizer.step()
-        #pdb.set_trace()
-        if self.learn_step_regularization == 0.0:
-            self.regularized_step(l2_cpy)
+        #if self.learn_step_regularization == 0.0:
+        #    self.regularized_step(l2_cpy)
 
     def update_l2_exposure(self, l2_exposed):
         for i in l2_exposed:
@@ -676,10 +778,11 @@ class L2_CE_CLOZE(nn.Module):
     def init_param_freeze(self,):
         for n, p in self.named_parameters():
             p.requires_grad = False
-        self.l1_tied_encoder_decoder.init_param_freeze(weight_type='l1')
-        self.l2_tied_encoder_decoder.init_param_freeze(weight_type='l2')
+        self.l1_tied_encoder_decoder.init_param_freeze()
+        self.l2_tied_encoder_decoder.init_param_freeze()
         for n, p in self.named_parameters():
             print(n, p.requires_grad)
+        pdb.set_trace()
         return True
 
     def init_cuda(self,):
@@ -692,34 +795,15 @@ class L2_CE_CLOZE(nn.Module):
     def is_cuda(self,):
         return self.context_encoder.is_cuda()
 
-    def get_l1_weights(self, on_device=True):
-        weights = self.l1_tied_encoder_decoder.get_weight(on_device)
-        ##TODO: push this function into l2_encoder object
-        #if isinstance(self.encoder, torch.nn.Embedding):
-        #    weights = self.encoder.weight.clone().detach()
-        #else:
-        #    raise BaseException("unknown l2_encoder type")
-        #if self.is_cuda() and not on_device:
-        #    weights = weights.cpu()
-        return weights
+    def get_l1_word_vecs(self, on_device=True):
+        return self.l1_tied_encoder_decoder.get_word_vecs(on_device)
 
-    def get_l2_weights(self, on_device=True):
-        weights = self.l2_tied_encoder_decoder.get_weight(on_device)
-        return weights
+    def get_l2_word_vecs(self, on_device=True):
+        return self.l2_tied_encoder_decoder.get_word_vecs(on_device)
 
-    def set_l2_weights(self, weights):
-        self.l2_tied_encoder_decoder.set_params(weights)
-        #if self.is_cuda():
-        #    weights = weights.clone().cuda()
-        #else:
-        #    weights = weights.clone()
-        #if isinstance(self.l2_encoder, torch.nn.Embedding):
-        #    if isinstance(weights, torch.nn.Parameter):
-        #        self.l2_encoder.weight.data = weights.data
-        #    elif isinstance(weights, torch.Tensor):
-        #        self.l2_encoder.weight.data = weights
-        #    else:
-        #        raise BaseException("unknown weight type")
-        #else:
-        #    raise BaseException("unknown l2_encoder type")
+    def get_l2_state_dict(self, on_device=True):
+        return self.l2_tied_encoder_decoder.get_state_dict()
+
+    def set_l2_state_dict(self, state_dict):
+        self.l2_tied_encoder_decoder.set_state_dict(state_dict)
         return True

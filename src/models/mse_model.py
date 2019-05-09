@@ -17,6 +17,8 @@ from src.rewards import get_nearest_neighbors
 
 from src.opt.noam import NoamOpt
 
+from collections import OrderedDict
+
 
 
 def batch_cosine_sim(a, b):
@@ -491,6 +493,9 @@ class L2_MSE_CLOZE(nn.Module):
         else:
             raise BaseException("unknown context_encoder")
 
+    def get_l1_word_vecs(self, ):
+        return self.get_l1_weights()
+
     def get_l1_weights(self, on_device=True):
         #TODO: push this function into l2_encoder object
         if isinstance(self._encoder, torch.nn.Embedding):
@@ -501,7 +506,15 @@ class L2_MSE_CLOZE(nn.Module):
             weights = weights.cpu()
         return weights
 
-    def get_l2_weights(self, on_device=True):
+    def get_l2_word_vecs(self,):
+        return self._get_l2_weights()
+
+    def get_l2_state_dict(self, ):
+        sd = OrderedDict()
+        sd['weights'] = self._get_l2_weights()
+        return sd
+
+    def _get_l2_weights(self, on_device=True):
         #TODO: push this function into l2_encoder object
         if isinstance(self._l2_encoder, torch.nn.Embedding):
             weights = self._l2_encoder.weight.clone().detach()
@@ -511,7 +524,11 @@ class L2_MSE_CLOZE(nn.Module):
             weights = weights.cpu()
         return weights
 
-    def set_l2_weights(self, weights):
+    def set_l2_state_dict(self, weights):
+        self._set_l2_weights(weights['weights'])
+        return True
+
+    def _set_l2_weights(self, weights):
         #TODO: push this function into l2_encoder object
         if self.is_cuda():
             weights = weights.clone().cuda()

@@ -20,6 +20,8 @@ from src.utils.utils import SPECIAL_TOKENS
 
 from search_mse import beam_search_per_sentence, make_start_state, nearest_neighbors
 
+import pdb
+
 
 def remove_special_tokens(t2i):
     _t2i = sorted([(i, t) for t, i in t2i.items()])
@@ -125,10 +127,16 @@ if __name__ == '__main__':
     l2_tied_encoder_decoder = make_l2_tied_encoder_decoder(l1_cloze_model.tied_encoder_decoder,
                                                            v2i, c2i, options.v2spell,
                                                            gv2i, gc2i, options.gv2spell)
+    l1_tied_encoder_decoder = l1_cloze_model.tied_encoder_decoder
+    l1_tied_encoder_decoder.param_type = 'l1'
+    l1_tied_encoder_decoder.mode = 'l2'
+    if isinstance(l1_tied_encoder_decoder, CharTiedEncoderDecoder):
+        l1_tied_encoder_decoder.init_cache()
+    l1_context_encoder = l1_cloze_model.context_encoder
     #we_size = l1_cloze_model.encoder.weight.size(1)
     #l2_encoder = make_wl_encoder(g_max_vocab, we_size, None)
-    cloze_model = L2_CE_CLOZE(context_encoder=l1_cloze_model.context_encoder,
-                              l1_tied_encoder_decoder=l1_cloze_model.tied_encoder_decoder,
+    cloze_model = L2_CE_CLOZE(context_encoder=l1_context_encoder,
+                              l1_tied_encoder_decoder=l1_tied_encoder_decoder,
                               l2_tied_encoder_decoder=l2_tied_encoder_decoder,
                               l1_dict=l1_cloze_model.l1_dict,
                               l2_dict=gv2i,
@@ -145,10 +153,10 @@ if __name__ == '__main__':
     print('total params', sum([p.numel() for p in cloze_model.parameters()]))
     print('trainable params', sum([p.numel() for p in cloze_model.parameters() if p.requires_grad]))
     macaronic_sents = []
-    weights = cloze_model.get_l2_weights()
-    init_weights = weights.clone()
+    init_weights = cloze_model.get_l2_state_dict()
     kwargs = vars(options)
     start_state = make_start_state(v2i, gv2i, i2v, i2gv, init_weights, cloze_model, dataset, **kwargs)
+    pdb.set_trace()
     now = time.time()
     best_state = beam_search_per_sentence(search_output,
                                           search_output_guesses,
@@ -160,8 +168,8 @@ if __name__ == '__main__':
     print(str(best_state))
     _, all_swapped_types = best_state.swap_counts()
     print('num_exposed', len(all_swapped_types))
-    l1_weights = cloze_model.get_l1_weights() #encoder.weight.data.detach().clone()
-    l2_weights = best_state.weights.detach().clone()
+    l1_weights = cloze_model.get_l1_word_vecs() #encoder.weight.data.detach().clone()
+    l2_weights = best_state.model.get_l2_word_vecs() #.weights.detach().clone()
     nn, nn_dict = nearest_neighbors(l1_weights, l2_weights,
                                     all_swapped_types,
                                     cloze_model.l1_dict_idx, cloze_model.l2_dict_idx, kwargs['rank_threshold'])
