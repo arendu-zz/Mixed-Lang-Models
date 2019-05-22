@@ -82,6 +82,7 @@ class MacaronicState(object):
         s.append('swap_types       :' + str(self.swap_type_counts))
         s.append('swap_token_count:' + str(self.swap_token_counts))
         s.append('possible_children:' + str(len(actions)))
+        s.append('possible_actions :' + str(actions))
         s.append('weightid         :' + ' '.join([str(id(v)) for k, v in self.weights.items()]))
         s.append('is_terminal      :' + str(self.terminal))
         s.append('start_score       :' + str(self.start_score))
@@ -146,7 +147,6 @@ class MacaronicState(object):
     def next_state(self, action, apply_swap_func, **kwargs):
         assert isinstance(action, tuple)
         #assert kwargs['reward_type'] == 'type_mrr_assist_check'
-        #print(c)
         if action == NEXT_SENT:
             c = self.copy()
             current_displayed_config = c.current_sentence()
@@ -164,6 +164,7 @@ class MacaronicState(object):
             #if c.score != c.start_score + (swap_result['score'] - (kwargs['penalty'] * swap_type_count)):
             #if c.score != c.start_score + swap_result['score']:
             if c.score != swap_result['score']:
+                print('here!!!!!!!!!!')
                 print(str(c.score) + ' is the original c.score')
                 print(str(swap_result['score']) + ' is the new score!!')
                 print(c)
@@ -194,7 +195,7 @@ class MacaronicState(object):
             #swap_token_counts, swap_types = c.swap_counts()
             #print(swap_types)
             swap_token_counts, swap_types = c.swap_counts()
-            if action[1] or action[0] == 1:
+            if action[1] or action[0] == 1: # $TODO why did we have action[0] == 1 expection??
                 #c.swap_token_counts = self.swap_token_counts + (1 if action[1] else 0)
                 swap_result = apply_swap_func(current_displayed_config,
                                               c.model,
@@ -215,6 +216,7 @@ class MacaronicState(object):
                 c.swap_token_counts = self.swap_token_counts
                 c.swap_type_counts = self.swap_type_counts
             next_state = c
+        #print('new state score', next_state.score, 'parent state score', self.score)
         return next_state
 
 

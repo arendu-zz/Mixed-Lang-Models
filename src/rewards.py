@@ -74,8 +74,11 @@ def mrr_score_embeddings(l2_embedding, l1_embedding, l2_key, l1_key, rank_thresh
             r = float(m.min().item()) + 1.0
         else:
             r = np.inf
+            #print(l2_kw.item())
         reciprocal_ranks.append(l2_kw.item() * (1.0 / r))
     score = sum(reciprocal_ranks) / (float(len(reciprocal_ranks)) + 1e-4)
+    #print(len(reciprocal_ranks), score)
+    #assert 0.0 <= score <= 1.0
     return score
 
 
@@ -106,8 +109,11 @@ def mmr_score_embedding_with_assist_check(l2_embedding, l1_embedding, l2_key, l1
         token_score = 1.0
 
     type_score = mrr_score_embeddings(l2_embedding, l1_embedding, l2_key, l1_key, rank_threshold, l2_key_wt)
+    assert token_score == 1.0 or token_score == -1.0
     final_score = token_score * type_score
-    return max(0, final_score)
+    final_score = max(0, final_score)
+    #assert final_score <= 1.0
+    return final_score
 
 
 def token_mrr_score_embeddings(l2_embedding, l1_embedding, l2_key, l1_key, l2_idx, rank_threshold):

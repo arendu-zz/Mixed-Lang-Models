@@ -161,7 +161,11 @@ def make_start_state(v2idx, gv2idx, idx2v, idx2gv, init_weights, model, dl, **kw
     pkl_list = pickle.load(open(kwargs['per_line_key'], 'rb'))
     per_line_key = []
     for pkl in pkl_list:
-        l1_k, l2_k = zip(*pkl)
+        if len(pkl) > 0:
+            l1_k, l2_k = zip(*pkl)
+        else:
+            l1_k = (0,)
+            l2_k = (0,)
         per_line_key.append((torch.LongTensor(list(l1_k)), torch.LongTensor(list(l2_k))))
 
     macaronic_sentences = []
@@ -202,18 +206,24 @@ def beam_search_per_sentence(search_file, guesses_file, json_file, latex_file, m
     q = PriorityQ(beam_size)
     q.append(init_state)
     sent_idx = 0
+    #best_score_tracker = float('-inf')
     while not best_state.terminal:
         while q.length() > 0:
+            #best_score_tracker = best_score_tracker if best_state.score < best_score_tracker else best_state.score
+            #print(best_state.score, best_score_tracker)
             curr_state = q.pop(kwargs['stochastic'] == 1)
             if 'verbose' in kwargs and kwargs['verbose']:
                 pass
             if curr_state.tie_break_score() >= best_state.tie_break_score(): #and curr_state.terminal:
-                #if curr_state.score >= best_state.score:
                 #print('old best state')
                 #print(best_state)
                 #print('new best state')
                 best_state = curr_state
                 #print(best_state)
+            else:
+                #print('no new best_state', curr_state.score, best_score_tracker)
+                #assert best_score_tracker <= curr_state.score
+                pass
             actions, action_weights = curr_state.possible_actions()
             for action in actions:  # sorted(zip(action_weights, actions), reverse=True):
                 if action == NEXT_SENT:
@@ -238,12 +248,15 @@ def beam_search_per_sentence(search_file, guesses_file, json_file, latex_file, m
             if latex_file is not None:
                 latex_file.write(latex_string + '\n')
             actions, action_weights = best_state.possible_actions()
+            if NEXT_SENT not in actions:
+                pdb.set_trace()
             assert NEXT_SENT in actions, "oops" + str(actions)
             init_next_sentence_state = best_state.next_state(NEXT_SENT, apply_swap, **kwargs)
             l1_weights = model.get_l1_word_vecs() # encoder.weight.data.detach().clone()
             l2_weights = init_next_sentence_state.model.get_l2_word_vecs() #.weights.detach().clone()
             nn, nn_dict = nearest_neighbors(l1_weights, l2_weights, l2, model.l1_dict_idx, model.l2_dict_idx, kwargs['rank_threshold'])
             print(nn)
+            print('best_state score', best_state.score)
             for w in obj_list:
                 if w['l2_vid'] in nn_dict:
                     w['nearest_neighbors'] = nn_dict[w['l2_vid']]
@@ -393,7 +406,6 @@ if __name__ == '__main__':
     init_weights = cloze_model.get_l2_state_dict()
     kwargs = vars(options)
     start_state = make_start_state(v2i, gv2i, i2v, i2gv, init_weights, cloze_model, dataset, **kwargs)
-    pdb.set_trace()
     now = time.time()
     best_state = beam_search_per_sentence(search_output,
                                           search_output_guesses,
@@ -415,4 +427,3 @@ if __name__ == '__main__':
     search_output_guesses.close()
     search_output_json.close()
     search_output_latex.close()
-

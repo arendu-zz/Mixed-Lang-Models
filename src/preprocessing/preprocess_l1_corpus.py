@@ -64,7 +64,10 @@ class Preprocess(object):
 
     def build(self, data_dir, corpus_file, dev_file,
               max_word_len=30, max_vocab=50000):
-        c2idx = {}
+        c1gram2idx = {}
+        c2gram2idx = {}
+        c3gram2idx = {}
+        c4gram2idx = {}
         for t in [SPECIAL_TOKENS.PAD,
                   SPECIAL_TOKENS.BOW,
                   SPECIAL_TOKENS.EOW,
@@ -72,7 +75,10 @@ class Preprocess(object):
                   SPECIAL_TOKENS.BOS,
                   SPECIAL_TOKENS.EOS,
                   SPECIAL_TOKENS.UNK]:
-            c2idx[t] = len(c2idx)
+            c1gram2idx[t] = len(c1gram2idx)
+            c2gram2idx[t] = len(c2gram2idx)
+            c3gram2idx[t] = len(c3gram2idx)
+            c4gram2idx[t] = len(c4gram2idx)
 
         print("building vocab...", corpus_file)
         line_num = 0
@@ -101,47 +107,99 @@ class Preprocess(object):
         print("word types", len(self.vocab))
         total_count = sum([self.wc.get(v, 0) for v in self.vocab])
         vocab_info = []
-        max_vl = 0
+        max_vl1 = 0
+        max_vl2 = 0
+        max_vl3 = 0
+        max_vl4 = 0
         for v in self.vocab:
             if v not in self.spl_words:
                 for c in list(v):
                     if ord(c) < 256:
-                        c2idx[c] = c2idx.get(c, len(c2idx))
+                        c1gram2idx[c] = c1gram2idx.get(c, len(c1gram2idx))
                     else:
                         pass
+                vs = [SPECIAL_TOKENS.BOW] + list(v) + [SPECIAL_TOKENS.EOW]
+                vs_2grams = [''.join(z) for z in zip(*[vs[i:] for i in range(2)])]
+                vs_3grams = [''.join(z) for z in zip(*[vs[i:] for i in range(3)])]
+                vs_4grams = [''.join(z) for z in zip(*[vs[i:] for i in range(4)])]
             else:
-                c2idx[v] = c2idx.get(v, len(c2idx))
-            vs = [SPECIAL_TOKENS.BOW] + list(v) + [SPECIAL_TOKENS.EOW]
-            cs = [c2idx[c] if c in c2idx else c2idx[SPECIAL_TOKENS.UNK_C] for c in vs]
-            vl = len(cs)
-            vocab_info.append((vl, v, cs))
-            max_vl = max_vl if max_vl > vl else vl
+                c1gram2idx[v] = c1gram2idx.get(v, len(c1gram2idx))
+                vs = [v]
+                vs_2grams = [v]
+                vs_3grams = [v]
+                vs_4grams = [v]
+            cs = [c1gram2idx[c] if c in c1gram2idx else c1gram2idx[SPECIAL_TOKENS.UNK_C] for c in vs]
+            vl1 = len(cs)
+            for c2 in vs_2grams:
+                c2gram2idx[c2] = c2gram2idx.get(c2, len(c2gram2idx))
+            cs2 = [c2gram2idx[c] for c in vs_2grams]
+            vl2 = len(cs2)
+            for c3 in vs_3grams:
+                c3gram2idx[c3] = c3gram2idx.get(c3, len(c3gram2idx))
+            cs3 = [c3gram2idx[c] for c in vs_3grams]
+            vl3 = len(cs3)
+            for c4 in vs_4grams:
+                c4gram2idx[c4] = c4gram2idx.get(c4, len(c4gram2idx))
+            cs4 = [c4gram2idx[c] for c in vs_4grams]
+            vl4 = len(cs4)
+            vocab_info.append((v, vl1, cs, vl2, cs2, vl3, cs3, vl4, cs4))
+            max_vl1 = max_vl1 if max_vl1 > vl1 else vl1
+            max_vl2 = max_vl2 if max_vl2 > vl2 else vl2
+            max_vl3 = max_vl3 if max_vl3 > vl3 else vl3
+            max_vl4 = max_vl4 if max_vl4 > vl4 else vl4
 
         # vocab_info = sorted(vocab_info, reverse=True)
-        vidx2spelling = {}
+        vidx2c1gram_spelling = {}
+        vidx2c2gram_spelling = {}
+        vidx2c3gram_spelling = {}
+        vidx2c4gram_spelling = {}
         vidx2unigram_prob = {}
         v2idx = {}
-        for v_idx, (vl, v, cs) in enumerate(vocab_info):
+        for v_idx, (v, vl1, cs1, vl2, cs2, vl3, cs3, vl4, cs4) in enumerate(vocab_info):
             v2idx[v] = v_idx
-            padder = [0] * (max_vl - vl)
-            vidx2spelling[v_idx] = cs + padder + [vl]
+            padder1 = [0] * (max_vl1 - vl1)
+            vidx2c1gram_spelling[v_idx] = cs1 + padder1 + [vl1]
+            padder2 = [0] * (max_vl2 - vl2)
+            vidx2c2gram_spelling[v_idx] = cs2 + padder2 + [vl2]
+            padder3 = [0] * (max_vl3 - vl3)
+            vidx2c3gram_spelling[v_idx] = cs3 + padder3 + [vl3]
+            padder4 = [0] * (max_vl4 - vl4)
+            vidx2c4gram_spelling[v_idx] = cs4 + padder4 + [vl4]
             vidx2unigram_prob[v_idx] = float(self.wc.get(v, 0)) / total_count
         idx2v = {idx: v for v, idx in v2idx.items()}
-        idx2c = {idx: c for c, idx in c2idx.items()}
+        idx2c1gram = {idx: c for c, idx in c1gram2idx.items()}
+        idx2c2gram = {idx: c for c, idx in c2gram2idx.items()}
+        idx2c3gram = {idx: c for c, idx in c3gram2idx.items()}
+        idx2c4gram = {idx: c for c, idx in c4gram2idx.items()}
         print("build done")
         print("saving files...")
         print('vocab size', len(self.vocab))
         pickle.dump(self.vocab, open(os.path.join(data_dir, 'l1.vocab.pkl'), 'wb'))
         pickle.dump(idx2v, open(os.path.join(data_dir, 'l1.idx2v.pkl'), 'wb'))
         print('v2idx size', len(v2idx))
-        assert len(idx2v) == len(v2idx) == len(vidx2spelling)
+        assert len(idx2v) == len(v2idx) == len(vidx2c1gram_spelling)
         pickle.dump(v2idx, open(os.path.join(data_dir, 'l1.v2idx.pkl'), 'wb'))
-        pickle.dump(vidx2spelling, open(os.path.join(data_dir, 'l1.vidx2spelling.pkl'), 'wb'))
+        pickle.dump(vidx2c1gram_spelling, open(os.path.join(data_dir, 'l1.vidx2c1gram_spelling.pkl'), 'wb'))
+        pickle.dump(vidx2c2gram_spelling, open(os.path.join(data_dir, 'l1.vidx2c2gram_spelling.pkl'), 'wb'))
+        pickle.dump(vidx2c3gram_spelling, open(os.path.join(data_dir, 'l1.vidx2c3gram_spelling.pkl'), 'wb'))
+        pickle.dump(vidx2c4gram_spelling, open(os.path.join(data_dir, 'l1.vidx2c4gram_spelling.pkl'), 'wb'))
         pickle.dump(vidx2unigram_prob, open(os.path.join(data_dir, 'l1.vidx2unigram_prob.pkl'), 'wb'))
-        print('char vocab size', len(c2idx), len(idx2c))
-        assert len(idx2c) == len(c2idx)
-        pickle.dump(idx2c, open(os.path.join(data_dir, 'l1.idx2c.pkl'), 'wb'))
-        pickle.dump(c2idx, open(os.path.join(data_dir, 'l1.c2idx.pkl'), 'wb'))
+        print('char vocab size', len(c1gram2idx), len(idx2c1gram))
+        assert len(idx2c1gram) == len(c1gram2idx)
+        pickle.dump(idx2c1gram, open(os.path.join(data_dir, 'l1.idx2c1gram.pkl'), 'wb'))
+        pickle.dump(c1gram2idx, open(os.path.join(data_dir, 'l1.c1gram2idx.pkl'), 'wb'))
+        print('char2 vocab size', len(c2gram2idx), len(idx2c2gram))
+        assert len(idx2c2gram) == len(c2gram2idx)
+        pickle.dump(idx2c2gram, open(os.path.join(data_dir, 'l1.idx2c2gram.pkl'), 'wb'))
+        pickle.dump(c2gram2idx, open(os.path.join(data_dir, 'l1.c2gram2idx.pkl'), 'wb'))
+        print('char3 vocab size', len(c3gram2idx), len(idx2c3gram))
+        assert len(idx2c3gram) == len(c3gram2idx)
+        pickle.dump(idx2c3gram, open(os.path.join(data_dir, 'l1.idx2c3gram.pkl'), 'wb'))
+        pickle.dump(c3gram2idx, open(os.path.join(data_dir, 'l1.c3gram2idx.pkl'), 'wb'))
+        print('char4 vocab size', len(c4gram2idx), len(idx2c4gram))
+        assert len(idx2c4gram) == len(c4gram2idx)
+        pickle.dump(idx2c4gram, open(os.path.join(data_dir, 'l1.idx2c4gram.pkl'), 'wb'))
+        pickle.dump(c4gram2idx, open(os.path.join(data_dir, 'l1.c4gram2idx.pkl'), 'wb'))
         return v2idx
 
 

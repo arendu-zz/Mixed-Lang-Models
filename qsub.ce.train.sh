@@ -6,29 +6,36 @@
 #$ -l gpu=1,hostname=c*,ram_free=4G,mem_free=4G,h_rt=72:00:00
 #$ -r no
 set -e
-if [ $# -ne 8 ]; then
-  echo 1>&2 "Usage: $0 L1_DATA_NAME EMBEDDING_SIZE MODEL_SIZE NUM_LAYERS CONTEXT_ENCODER CHARAWARE CHKPT BS"
+if [ $# -ne 6 ]; then
+  echo 1>&2 "Usage: $0 L1_DATA_NAME MODEL_SIZE CONTEXT_ENCODER{lm,cloze} CHARAWARE{0,1,2} POOL{Max,Ave,LP} LEARN_MAIN_EMBS{0,1}"
   exit 3
 fi
 source /home/arenduc1/anaconda3/bin/activate /home/arenduc1/anaconda3/envs/pytorch041env
 PROJECT_DIR=/export/b07/arenduc1/macaronic-multi-agent
-L1_DATA_NAME=$1 #wiki103 or grimm
+L1_DATA_NAME=$1 #wikisimple #or grimm
 L1_DATA=$PROJECT_DIR/lmdata/${L1_DATA_NAME}
 EMBEDDING_PRETRAIN=0
 EMBEDDING_SIZE=$2
-MODEL_SIZE=$3 #600 #300, 1000
-NUM_LAYERS=$4
+MODEL_SIZE=$2 #600 #300, 1000
 LOSS_TYPE="ce" #$3 #mse, huber, cs
-CONTEXT_ENCODER=$5
-CHARAWARE=$6
-CHKPT=$7
-BATCH_SIZE=$8
-EPOCHS=15
+CONTEXT_ENCODER=$3
+CHARAWARE=$4
+POOL_TYPE=$5
+LANG_BIT_RATIO=0
+LEARN_MAIN_EMBS=$6
+CHKPT=1000
+if [ $CONTEXT_ENCODER == 'lm' ]; then
+  NUM_LAYERS=2
+elif [ $CONTEXT_ENCODER == 'cloze' ]; then
+  NUM_LAYERS=1
+fi
+BATCH_SIZE=5000
+EPOCHS=8
 device=`free-gpu`
 SEED=2000
-USE_EARLY_STOP=0
+USE_EARLY_STOP=1
 LOSS_AT="all"
-NAME=es.$USE_EARLY_STOP.ce.$CONTEXT_ENCODER.la.$LOSS_AT.seed.$SEED.es.$EMBEDDING_SIZE.ep.$EMBEDDING_PRETRAIN.rs.$MODEL_SIZE.nl.$NUM_LAYERS.ca.$CHARAWARE.epoch.$EPOCHS
+NAME=es.$USE_EARLY_STOP.ce.$CONTEXT_ENCODER.seed.$SEED.es.$EMBEDDING_SIZE.rs.$MODEL_SIZE.nl.$NUM_LAYERS.ca.$CHARAWARE.pt.$POOL_TYPE.lbr.$LANG_BIT_RATIO.lme.$LEARN_MAIN_EMBS.epoch.$EPOCHS
 SAVE_DIR=$L1_DATA/l1_ce_models/$NAME
 mkdir -p $SAVE_DIR
 \rm -rf $PROJECT_DIR/__pycache__
@@ -47,12 +54,15 @@ python $PROJECT_DIR/train_ce.py \
   --epochs $EPOCHS \
   --v2i $L1_DATA/l1.v2idx.pkl \
   --vmat $L1_DATA/l1.mat.pt \
-  --v2spell $L1_DATA/l1.vidx2spelling.pkl \
-  --c2i $L1_DATA/l1.c2idx.pkl \
+  --cgram2i $L1_DATA/l1.c1gram2idx.pkl,$L1_DATA/l1.c2gram2idx.pkl,$L1_DATA/l1.c3gram2idx.pkl,$L1_DATA/l1.c4gram2idx.pkl \
+  --v2cgramspell $L1_DATA/l1.vidx2c1gram_spelling.pkl,$L1_DATA/l1.vidx2c2gram_spelling.pkl,$L1_DATA/l1.vidx2c3gram_spelling.pkl,$L1_DATA/l1.vidx2c4gram_spelling.pkl \
   --seed $SEED \
   --use_early_stop $USE_EARLY_STOP \
   --context_encoder $CONTEXT_ENCODER \
   --char_aware $CHARAWARE \
+  --pool_type $POOL_TYPE \
+  --lang_bit_ratio $LANG_BIT_RATIO \
+  --learn_main_embs $LEARN_MAIN_EMBS \
   --checkpoint_freq $CHKPT 2>&1 | tee  ${SAVE_DIR}/log
 #\rm -f $SAVE_DIR/good_model
 #python $PROJECT_DIR/good_and_overfit.py $SAVE_DIR

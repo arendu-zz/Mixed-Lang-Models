@@ -17,26 +17,33 @@ from src.rewards import rank_score_embeddings
 from src.rewards import get_nearest_neighbors
 
 from src.opt.noam import NoamOpt
-
-import pickle
 import pdb
 
 
+
+def spell2mat(v2spell):
+    spelling_mat = torch.Tensor(len(v2spell), len(v2spell[0])).fill_(0).long()
+    for k, v in v2spell.items():
+        spelling_mat[k] = torch.tensor(v)
+    spelling_mat = spelling_mat[:, :-1]
+    return spelling_mat
+
+
 def make_l2_tied_encoder_decoder(l1_tied_enc_dec,
-                                 v2i, c2i, vspelling,
-                                 g2i, gc2i, gv2spelling):
+                                 v2i, l1_cgram2i_list, l1_cgram_spelling_mat_list,
+                                 g2i, l2_cgram2i_list, l2_cgram_spelling_mat_list, l2_cgram_by_l1_spelling_mat_list,
+                                 init_l2_prior, init_l2_with_l1,
+                                 scale, init_range,
+                                 l2_pos_weighted):
     if isinstance(l1_tied_enc_dec, CharTiedEncoderDecoder):
-        assert gv2spelling is not None
-        v2spell = pickle.load(open(gv2spelling, 'rb'))
-        spelling_mat = torch.Tensor(len(v2spell), len(v2spell[0])).fill_(0).long()
-        for k, v in v2spell.items():
-            spelling_mat[k] = torch.tensor(v)
-        spelling_mat = spelling_mat[:, :-1] # throw away length of spelling because we going to use cnns
+        c2i = l1_cgram2i_list[0]
+        gc2i = l2_cgram2i_list[0]
+        gv2spell_mat = l2_cgram_spelling_mat_list[0]
         l2_tied_enc_dec = CharTiedEncoderDecoder(char_vocab_size=len(gc2i),
                                                  char_embedding_size=l1_tied_enc_dec.char_embedding.embedding_dim,
                                                  word_vocab_size=len(g2i),
                                                  word_embedding_size=l1_tied_enc_dec.word_embedding_size,
-                                                 spelling_mat=spelling_mat,
+                                                 spelling_mat=gv2spell_mat,
                                                  mode='l2',
                                                  pool=l1_tied_enc_dec.pool_type,
                                                  num_lang_bits=l1_tied_enc_dec.num_lang_bits)
@@ -52,6 +59,53 @@ def make_l2_tied_encoder_decoder(l1_tied_enc_dec,
         l2_tied_enc_dec.embedding.weight.data.uniform_(-0.01, 0.01)
         l2_tied_enc_dec.param_type = 'l2'
         return l2_tied_enc_dec
+    elif isinstance(l1_tied_enc_dec, CGramTiedEncoderDecoder):
+        l2_cgram_vocab_sizes = [len(i) for i in l2_cgram2i_list]
+        #l2_i2cgram_list = []
+        #for i in l2_cgram2i_list:
+        #    _i = {v: k for k, v in i.items()}
+        #    l2_i2cgram_list.append(_i)
+        l1_word_vocab_size = l1_tied_enc_dec.l1_word_vocab_size
+        word_embedding_size = l1_tied_enc_dec.word_embedding_size
+        l2_word_vocab_size = len(g2i)
+        min_cgram = l1_tied_enc_dec.min_cgram
+        max_cgram = l1_tied_enc_dec.max_cgram
+        l2_cgram_vocab_sizes = l2_cgram_vocab_sizes[min_cgram:max_cgram]
+        l2_cgram_spelling_mat_list = l2_cgram_spelling_mat_list[min_cgram:max_cgram]
+        l2_cgram_by_l1_spelling_mat_list = l2_cgram_by_l1_spelling_mat_list[min_cgram:max_cgram]
+        l2_tied_enc_dec = CGramTiedEncoderDecoder(l1_cgram_vocab_sizes=l1_tied_enc_dec.l1_cgram_vocab_sizes,
+                                                  l1_cgram_spelling_mats=l1_tied_enc_dec.l1_cgram_spelling_mats,
+                                                  l1_word_vocab_size=l1_word_vocab_size,
+                                                  l2_cgram_vocab_sizes=l2_cgram_vocab_sizes,
+                                                  l2_cgram_spelling_mats=l2_cgram_spelling_mat_list,
+                                                  l2_cgram_by_l1_spelling_mats=l2_cgram_by_l1_spelling_mat_list,
+                                                  l2_word_vocab_size=l2_word_vocab_size,
+                                                  word_embedding_size=word_embedding_size,
+                                                  mode='l2',
+                                                  min_cgram=l1_tied_enc_dec.min_cgram,
+                                                  max_cgram=l1_tied_enc_dec.max_cgram,
+                                                  param_type='l2',
+                                                  learn_main_l1_embs=False,
+                                                  use_l2_subwords=init_l2_with_l1 == 'init_subwords',
+                                                  init_range=init_range,
+                                                  l2_pos_weighted=l2_pos_weighted)
+        if init_l2_prior:
+            l2_tied_enc_dec.init_l2_word_vecs_prior()
+        if init_l2_with_l1 == 'init_main':
+            l2_tied_enc_dec.copy_l1_params(l1_tied_enc_dec.l1_word_embedding, l1_tied_enc_dec.l1_params)
+            l2_tied_enc_dec.init_with_l1_cgrams(scale)
+        elif init_l2_with_l1 == 'init_subwords':
+            l2_tied_enc_dec.copy_l1_subparams_into_l2_subparams(l1_cgram2i_list[min_cgram:max_cgram],
+                                                                l1_tied_enc_dec.l1_params,
+                                                                l2_cgram2i_list[min_cgram:max_cgram],
+                                                                scale)
+            l2_tied_enc_dec.copy_l1_wordparams_into_l2_wordparams(v2i, g2i,
+                                                                  l1_tied_enc_dec.l1_word_embedding,
+                                                                  scale)
+        elif init_l2_with_l1 == 'no_init':
+            l2_tied_enc_dec.l2_params[0].weight.data.uniform_(-init_range, init_range)
+            pass
+        return l2_tied_enc_dec
     else:
         raise NotImplementedError("unknown tied_encoder_decoder")
 
@@ -63,8 +117,9 @@ class TiedEncoderDecoder(nn.Module):
         self.vocab_size = vocab_size
         self.embedding_size = embedding_size
         self.mode in ['l1', 'l2']
-        self.embedding = torch.nn.Embedding(vocab_size, embedding_size)
+        self.embedding = torch.nn.Embedding(vocab_size, embedding_size, padding_idx=0)
         self.embedding.weight.data.normal_(0, 1.0)
+        self.embedding.weight.data[0, :] = 0.
         if vmat is not None:
             self.embedding.weight.data = vmat
             self.pretrained = True
@@ -140,6 +195,326 @@ class TiedEncoderDecoder(nn.Module):
         #self.l2_encoder.weight.data = 0.3 * l2_encoder_cpy + 0.7 * self.l2_encoder.weight.data
         self.set_params(0.3 * new_params + 0.7 * self.get_params())
         return True
+
+
+class CGramTiedEncoderDecoder(nn.Module):
+    def __init__(self,
+                 l1_cgram_vocab_sizes, l1_cgram_spelling_mats, l1_word_vocab_size,
+                 l2_cgram_vocab_sizes, l2_cgram_spelling_mats, l2_cgram_by_l1_spelling_mats, l2_word_vocab_size,
+                 word_embedding_size,
+                 mode, min_cgram, max_cgram, param_type, learn_main_l1_embs, use_l2_subwords,
+                 init_range, l2_pos_weighted):
+        super().__init__()
+
+        self.dropout = nn.Dropout(0.2)
+
+        self.l1_cgram_spelling_mats = l1_cgram_spelling_mats
+        self.l1_cgram_vocab_sizes = l1_cgram_vocab_sizes
+        self.l1_word_vocab_size = l1_word_vocab_size
+        self.word_embedding_size = word_embedding_size
+        self.learn_main_l1_embs = learn_main_l1_embs
+
+        self.l2_cgram_vocab_sizes = l2_cgram_vocab_sizes
+        self.l2_cgram_spelling_mats = l2_cgram_spelling_mats
+        self.l2_cgram_by_l1_spelling_mats = l2_cgram_by_l1_spelling_mats
+        self.l2_word_vocab_size = l2_word_vocab_size
+        self.l2_pos_weighted = l2_pos_weighted
+
+        self.mode = mode
+        assert self.mode in ['l1', 'l2']
+        self.param_type = param_type
+        assert self.param_type in ['l1', 'l2']
+
+        self.min_cgram = min_cgram # needed for l2_tied_enc_dec
+        self.max_cgram = max_cgram
+
+        self.l1_params = nn.ModuleList([])
+        self.l1_cgram_spelling_embs = []
+
+        self.l2_cgram_spelling_embs = []
+        self.l2_cgram_by_l1_spelling_embs = []
+        self.l2_params = nn.ModuleList([])
+
+        for cg_sm, cg_vs in zip(self.l1_cgram_spelling_mats, self.l1_cgram_vocab_sizes):
+            assert self.l1_word_vocab_size == cg_sm.shape[0], "spelling mat does not match word_vocab_size"
+            s_emb = torch.nn.Embedding(cg_sm.shape[0], cg_sm.shape[1])
+            s_emb.weight.data = cg_sm
+            s_emb.weight.requires_grad = False
+            self.l1_cgram_spelling_embs.append(s_emb)
+
+            emb = torch.nn.Embedding(cg_vs, self.word_embedding_size, padding_idx=0)
+            emb.weight.data.uniform_(-1.0, 1.0)
+            emb.weight.data[0, :] = 0.
+            self.l1_params.append(emb)
+
+        self.l1_word_embedding = torch.nn.Embedding(l1_word_vocab_size, word_embedding_size, padding_idx=0)
+        if self.learn_main_l1_embs:
+            self.l1_word_embedding.weight.data.uniform_(-1.0, 1.0)
+        else:
+            self.l1_word_embedding.weight.data.fill_(0.0)
+        self.l1_word_embedding.weight.data[0, :] = 0.
+        self.l1_word_embedding.weight.requires_grad = self.learn_main_l1_embs
+
+        self.use_cache_embedding = False
+        self.use_l2_subwords = use_l2_subwords
+        #self.l1_cached_word_embedding = None
+        #self.l1_cached_word_embedding_decoder = None
+
+        if self.mode == 'l2':
+            self.l2_word_vecs_prior = None
+            l2_word_embedding = torch.nn.Embedding(l2_word_vocab_size, word_embedding_size, padding_idx=0)
+            print('using init_range', init_range)
+            l2_word_embedding.weight.data.uniform_(-init_range, init_range)
+            l2_word_embedding.weight.data[0, :] = 0.
+            self.l2_params.append(l2_word_embedding)
+            self.l1_subword_weight = 0.0 # init_range
+            print(self.l1_subword_weight, 'is the l1_subword_weight')
+            for cg_by_l1_sm in self.l2_cgram_by_l1_spelling_mats:
+                assert self.l2_word_vocab_size == cg_by_l1_sm.shape[0], "spelling mat does not match word_vocab_size"
+                s_by_l1_emb = torch.nn.Embedding(cg_by_l1_sm.shape[0], cg_by_l1_sm.shape[1])
+                s_by_l1_emb.weight.data = cg_by_l1_sm
+                s_by_l1_emb.weight.requires_grad = False
+                self.l2_cgram_by_l1_spelling_embs.append(s_by_l1_emb)
+            assert len(self.l2_cgram_by_l1_spelling_embs) == len(self.l1_params)
+
+            print(self.use_l2_subwords, 'is the use_l2_subwords')
+            for cg_sm, cg_vs in zip(self.l2_cgram_spelling_mats, self.l2_cgram_vocab_sizes):
+                assert self.l2_word_vocab_size == cg_sm.shape[0], "spelling mat does not match word_vocab_size"
+                s_emb = torch.nn.Embedding(cg_sm.shape[0], cg_sm.shape[1])
+                s_emb.weight.data = cg_sm
+                s_emb.weight.requires_grad = False
+                if self.use_l2_subwords:
+                    self.l2_cgram_spelling_embs.append(s_emb)
+
+                emb = torch.nn.Embedding(cg_vs, self.word_embedding_size, padding_idx=0)
+                emb.weight.data.uniform_(-init_range, init_range)
+                emb.weight.data[0, :] = 0.
+                if self.use_l2_subwords:
+                    self.l2_params.append(emb)
+        else:
+            pass
+
+    def copy_l1_wordparams_into_l2_wordparams(self, l1_v2idx, l2_v2idx, l1_word_embedding, scale):
+        for v, idx in l2_v2idx.items():
+            if l1_v2idx.get(v, float('inf')) < 50000:
+                self.l2_params[0].weight.data[idx, :] = (l1_word_embedding.weight.data[l1_v2idx[v], :].clone() * scale)
+        return True
+
+    def copy_l1_subparams_into_l2_subparams(self, l1_cgram2i_list, l1_params, l2_cgram2i_list, scale):
+        assert len(l1_cgram2i_list) == len(l1_params) == len(l2_cgram2i_list) == len(self.l2_params) - 1
+        for l1_p, l1_c2i, l2_p, l2_c2i in zip(l1_params, l1_cgram2i_list,
+                                              self.l2_params[1:], l2_cgram2i_list):
+            for c, c_idx in l2_c2i.items():
+                #print(c, l1_c2i.get(c, 0), 'idx in l1')
+                if c in l1_c2i:
+                    l2_p.weight.data[c_idx, :] = l1_p.weight.data[l1_c2i[c], :].clone() * scale
+        return True
+
+    def copy_l1_params(self, l1_word_embedding, l1_params):
+        self.l1_word_embedding.weight.data = l1_word_embedding.weight.data
+        assert len(self.l1_params) == len(l1_params)
+        for self_l1_p, l1_p in zip(self.l1_params, l1_params):
+            self_l1_p.weight.data = l1_p.weight.data.clone()
+        return True
+
+    def init_l2_word_vecs_prior(self,):
+        v = torch.arange(self.l2_word_vocab_size).type_as(self.l2_params[0].weight.data).long()
+        foo = self.summed_subword_emb(v, self.l1_params, self.l2_cgram_by_l1_spelling_embs, pos_weighted=True)
+        self.l2_word_vecs_prior = foo.detach()
+        return True
+
+    def init_with_l1_cgrams(self, scale):
+        v = torch.arange(self.l2_word_vocab_size).type_as(self.l2_params[0].weight.data).long()
+        foo = self.summed_subword_emb(v, self.l1_params, self.l2_cgram_by_l1_spelling_embs, pos_weighted=False, scale=scale)
+        self.l2_params[0].weight.data = foo.detach() #* (f / g)
+        return True
+
+    def embedding_dim(self,):
+        return self.word_embedding_size
+
+    def init_cache(self,):
+        #assert self.mode == 'l2'
+        #if self.param_type == 'l1':
+        #    word_emb = self._compute_word_embeddings().detach()
+        #    self.l1_cached_word_embedding = nn.Embedding(self.l1_word_vocab_size, self.word_embedding_size)
+        #    self.l1_cached_word_embedding.weight.data = word_emb
+        #    self.l1_cached_word_embedding_decoder = torch.nn.Linear(self.word_embedding_size,
+        #                                                            self.l1_word_vocab_size,
+        #                                                            bias=False)
+        #    self.l1_cached_word_embedding_decoder.weight = self.l1_cached_word_embedding.weight
+        #    self.use_cache_embedding = True
+        #elif self.param_type == 'l2':
+        #    pass
+        #else:
+        #    pass
+        return True
+
+    def summed_subword_emb(self, data, emb_list, spelling_emb_list, pos_weighted=False, scale=1.0, mean=True):
+        #mean was false by default and only used for when param_type == 2
+        assert len(emb_list) == len(spelling_emb_list)
+        emb = 0
+        data_dim = data.dim()
+        for cg_emb, cg_spelling_emb in zip(emb_list, spelling_emb_list):
+            cg_spelling = cg_spelling_emb(data).long()  # (data_dims, cgram_spelling_length)
+            cg_spelling_lens = (cg_spelling != cg_emb.padding_idx).sum(data_dim)
+            sub_emb = cg_emb(cg_spelling)  # (data_dims, cgram_spelling_length, word_embedding_size)
+            if pos_weighted:
+                _r = list(range(sub_emb.shape[data_dim] - 1, -1, -1))
+                pos_wts = (torch.Tensor(_r).type_as(sub_emb) * (1.0 / (sub_emb.shape[data_dim] - 1))) ** 2
+                pos_wts = pos_wts.unsqueeze(1).unsqueeze(0).expand_as(sub_emb)
+                sub_emb = sub_emb * pos_wts
+            sub_emb = sub_emb.sum(data_dim)  # (data_dims, word_embedding_Size)
+            if mean:
+                cg_spelling_lens = cg_spelling_lens.unsqueeze(data_dim).float().expand_as(sub_emb) + 1e-2
+                sub_emb = sub_emb / cg_spelling_lens
+            emb = emb + (sub_emb * scale)
+        return emb
+
+    def _compute_word_embeddings(self,):
+        if self.param_type == 'l1':
+            v = torch.arange(self.l1_word_vocab_size).type_as(self.l1_word_embedding.weight.data).long()
+            word_emb = self.l1_word_embedding(v)
+            word_emb = word_emb + self.summed_subword_emb(v, self.l1_params, self.l1_cgram_spelling_embs)
+            if self.mode == 'l1':
+                word_emb = self.dropout(word_emb)
+            return word_emb
+        elif self.param_type == 'l2':
+            v = torch.arange(self.l2_word_vocab_size).type_as(self.l2_params[0].weight.data).long()
+            word_emb = self.l2_params[0](v)
+            if self.use_l2_subwords:
+                #mean was false by default and only used for when param_type == 2
+                word_emb = word_emb + self.summed_subword_emb(v, self.l2_params[1:],
+                                                              self.l2_cgram_spelling_embs,
+                                                              pos_weighted=self.l2_pos_weighted)
+            return word_emb
+        else:
+            raise BaseException("bad param_type")
+
+    def input_forward(self, data):
+        # data shape = (bsz, seq)
+        #if self.use_cache_embedding:
+        #    assert self.param_type == 'l1'
+        #    return self.l1_cached_word_embedding(data)
+
+        if self.param_type == 'l1':
+            word_emb = self.l1_word_embedding(data)  # (bsz, seq, word_embedding_size)
+            word_emb = word_emb + self.summed_subword_emb(data, self.l1_params, self.l1_cgram_spelling_embs)
+            if self.mode == 'l1':
+                word_emb = self.dropout(word_emb)
+            return word_emb
+        elif self.param_type == 'l2':
+            word_emb = self.l2_params[0](data)  # (bsz, seq, word_embedding_size)
+            if self.use_l2_subwords:
+                word_emb = word_emb + self.summed_subword_emb(data,
+                                                              self.l2_params[1:],
+                                                              self.l2_cgram_spelling_embs,
+                                                              pos_weighted=self.l2_pos_weighted)
+            #####word_emb = word_emb + self.l1_subword_weight * self.summed_subword_emb(data, self.l1_params, self.l2_cgram_by_l1_spelling_embs)
+            return word_emb
+        else:
+            raise BaseException("bad param_type")
+
+    def output_forward(self, data):
+        #if self.use_cache_embedding:
+        #    assert self.param_type == 'l1'
+        #    return self.l1_cached_word_embedding_decoder(data)
+        word_emb = self._compute_word_embeddings()
+        return torch.matmul(data, word_emb.transpose(0, 1))
+
+    def forward(self, data, mode):
+        if mode == 'input':
+            return self.input_forward(data)
+        elif mode == 'output':
+            return self.output_forward(data)
+        else:
+            raise NotImplementedError("unknown mode")
+
+    def _disable_l1_param_learning(self,):
+        assert self.mode == 'l2'
+        self.l1_word_embedding.weight.requires_grad = False
+        for p in self.l1_params:
+            p.weight.requires_grad = False
+        return True
+
+    def init_param_freeze(self, ):
+        if self.mode == 'l1':
+            if self.param_type == 'l1':
+                self.l1_word_embedding.weight.requires_grad = self.learn_main_l1_embs
+                for p in self.l1_params:
+                    p.weight.requires_grad = True
+            if self.param_type == 'l2':
+                raise BaseException("should not be here!")
+        elif self.mode == 'l2':
+            if self.param_type == 'l1':
+                self.l1_word_embedding.weight.requires_grad = False
+                for p in self.l1_params:
+                    p.weight.requires_grad = False
+                assert len(self.l2_params) == 0
+            elif self.param_type == 'l2':
+                self.l1_word_embedding.weight.requires_grad = False
+                for p in self.l1_params:
+                    p.weight.requires_grad = False
+                for p in self.l2_params:
+                    p.weight.requires_grad = True
+            else:
+                raise NotImplementedError("unknown param_type/mode combination")
+        else:
+            raise BaseException("unknown mode...")
+
+        for sm_emb in self.l1_cgram_spelling_embs:
+            sm_emb.weight.requires_grad = False
+
+        for sm_emb in self.l2_cgram_spelling_embs:
+            sm_emb.weight.requires_grad = False
+
+        for sm_emb in self.l2_cgram_by_l1_spelling_embs:
+            sm_emb.weight.requires_grad = False
+        return True
+
+    def init_cuda(self,):
+        self = self.cuda()
+        for sm_emb in self.l1_cgram_spelling_embs:
+            sm_emb = sm_emb.cuda()
+        for sm_emb in self.l2_cgram_spelling_embs:
+            sm_emb = sm_emb.cuda()
+        for sm_emb in self.l2_cgram_by_l1_spelling_embs:
+            sm_emb = sm_emb.cuda()
+        return True
+
+    def is_cuda(self,):
+        return self.l1_word_embedding.weight.data.is_cuda
+
+    def get_word_vecs(self, on_device=True):
+        weights = self._compute_word_embeddings().detach().clone()
+        if on_device:
+            pass
+        else:
+            weights = weights.cpu()
+        return weights
+
+    def get_undetached_state_dict(self,):
+        assert self.param_type == 'l2'
+        return self.l2_params.named_parameters()
+
+    def get_state_dict(self,):
+        assert self.param_type == 'l2'
+        sd = OrderedDict()
+        for k, v in self.l2_params.state_dict().items():
+            sd[k] = v.clone()
+        return sd
+
+    def set_state_dict(self, new_state_dict):
+        assert self.param_type == 'l2'
+        self.l2_params.load_state_dict(new_state_dict)
+        return True
+
+    def vocab_size(self,):
+        if self.param_type == 'l1':
+            return self.l1_word_vocab_size
+        elif self.param_type == 'l2':
+            return self.l2_word_vocab_size
+        else:
+            raise BaseException("wrong mode set")
 
 
 class CharTiedEncoderDecoder(nn.Module):
@@ -652,8 +1027,11 @@ class L2_CE_CLOZE(nn.Module):
                  l2_key,
                  l2_key_wt,
                  learn_step_regularization,
+                 zero_regularization,
+                 regularization_type,
                  learning_steps=3,
-                 step_size=0.1):
+                 step_size=0.1,
+                 max_grad_norm=5.0):
         super().__init__()
         self.context_encoder = context_encoder
         self.l1_tied_encoder_decoder = l1_tied_encoder_decoder
@@ -672,14 +1050,18 @@ class L2_CE_CLOZE(nn.Module):
         self.init_param_freeze()
         self.learning_steps = learning_steps
         self.learn_step_regularization = learn_step_regularization
+        self.zero_regularization = zero_regularization
+        self.regularization_type = regularization_type
         assert self.learn_step_regularization >= 0.0
+        assert self.zero_regularization >= 0.0
         #self.optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.parameters()), lr=0.1)
         #self.optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()))
+        self.max_grad_norm = max_grad_norm
         self.init_optimizer()
 
     def init_optimizer(self,):
         self.optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, self.parameters()), lr=0.1)
-        #self.optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()))
+        ##self.optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()))
 
     def init_key(self,):
         if self.l1_key is not None:
@@ -733,7 +1115,6 @@ class L2_CE_CLOZE(nn.Module):
         j_data = l1_data.clone()
         j_data[l2_idxs == 1] = l2_data[l2_idxs == 1] + self.l1_tied_encoder_decoder.vocab_size()
         hidden = self.context_encoder(mixed_encoded, lengths, forward_mode='L2')
-        #pdb.set_trace()
         out_l1 = self.l1_tied_encoder_decoder(hidden, mode='output')
         out_l2 = self.l2_tied_encoder_decoder(hidden, mode='output')
         l2_mask = torch.ones(out_l2.size(2)).type_as(l2_data)
@@ -741,7 +1122,7 @@ class L2_CE_CLOZE(nn.Module):
         out_l2[:, :, l2_mask == 1] = float('-inf')
         out = torch.cat([out_l1, out_l2], dim=2)
         loss = self.loss(out.view(-1, out.size(2)), j_data.view(-1))
-        return loss
+        return loss, l2_mask
 
     def regularized_step(self, l2_cpy):
         raise BaseException("not using this...")
@@ -749,25 +1130,51 @@ class L2_CE_CLOZE(nn.Module):
         return True
 
     def learn_step(self, batch):
-        #old_l2_cpy = self.l2_tied_encoder_decoder.get_word_vecs()
-        l2_cpy = self.l2_tied_encoder_decoder.get_state_dict()
+        l2_cpy = self.l2_tied_encoder_decoder.get_word_vecs()
+        ##l2_cpy = self.l2_tied_encoder_decoder.get_state_dict()
         self.init_optimizer()
         for _ in range(self.learning_steps):
             self.optimizer.zero_grad()
-            loss = self(batch)
+            loss, l2_mask = self(batch)
             #l2_regularized = ((old_l2_cpy - self.l2_tied_encoder_decoder.get_weight_without_detach()) ** 2).sum()
-            l2_regularized = 0
-            for n, p in self.l2_tied_encoder_decoder.get_undetached_state_dict():
-                if p.requires_grad:
-                    l2_regularized = l2_regularized + torch.nn.functional.mse_loss(p, l2_cpy[n], reduction='sum')
+            l2_regularized = torch.tensor(0.0).type_as(l2_cpy)
+            zero_l2_regularized = torch.tensor(0.0).type_as(l2_cpy)
+            #for n, p in self.l2_tied_encoder_decoder.get_undetached_state_dict():
+            for p in [self.l2_tied_encoder_decoder._compute_word_embeddings()]:
+                p_changed = p[l2_mask == 0, :]
+                l2_cpy_changed = l2_cpy[l2_mask == 0, :]
+                if p.requires_grad and p_changed.shape[0] > 0:
+                    #print('regularized_step for ', p.shape)
+                    #_l2_to_previous = torch.nn.functional.mse_loss(p, l2_cpy, reduction='sum')
+                    if self.regularization_type == 'mse':
+                        _l2_to_previous_changed = torch.nn.functional.mse_loss(p_changed, l2_cpy_changed, reduction='sum')
+                        _l2_to_zero = torch.nn.functional.mse_loss(p_changed, torch.zeros_like(l2_cpy_changed), reduction='sum')
+                    elif self.regularization_type == 'huber':
+                        _l2_to_previous_changed = torch.nn.functional.smooth_l1_loss(p_changed, l2_cpy_changed, reduction='sum')
+                        _l2_to_zero = torch.nn.functional.smooth_l1_loss(p_changed, torch.zeros_like(l2_cpy_changed), reduction='sum')
+                    elif self.regularization_type == 'l1':
+                        _l2_to_previous_changed = torch.nn.functional.l1_loss(p_changed, l2_cpy_changed, reduction='sum')
+                        _l2_to_zero = torch.nn.functional.l1_loss(p_changed, torch.zeros_like(l2_cpy_changed), reduction='sum')
+                    else:
+                        raise BaseException("unknonwn reg type")
+
+                    l2_regularized = l2_regularized + _l2_to_previous_changed
+                    zero_l2_regularized = zero_l2_regularized + _l2_to_zero
+                    ##l2_regularized = l2_regularized + torch.nn.functional.mse_loss(p, torch.zeros_like(p), reduction='sum')
                 else:
                     pass
             #print('%.2f' % (old_l2_regularized - l2_regularized).sum().item(), 'REGS!!!!!!!!!!!!!!!')
-            final_loss = loss + (self.learn_step_regularization * l2_regularized)
-            #print(_, final_loss.item(), loss.item(), l2_regularized.item(), self.learn_step_regularization)
+            final_loss = loss + (self.learn_step_regularization * l2_regularized) + \
+                (self.zero_regularization * zero_l2_regularized)
+            #print('x', _, final_loss.item(), loss.item(), l2_regularized.item(), zero_l2_regularized.item(), self.learn_step_regularization)
             final_loss.backward()
             #print([p.grad.sum() if p.grad is not None else 'none' for n, p in self.named_parameters()])
-            self.optimizer.step()
+            grad_norm = torch.nn.utils.clip_grad_norm_(filter(lambda p: p.requires_grad, self.parameters()),
+                                                       self.max_grad_norm)
+            if math.isnan(grad_norm):
+                print('skipping update grad_norm is nan!')
+            else:
+                self.optimizer.step()
         #if self.learn_step_regularization == 0.0:
         #    self.regularized_step(l2_cpy)
 
@@ -782,7 +1189,6 @@ class L2_CE_CLOZE(nn.Module):
         self.l2_tied_encoder_decoder.init_param_freeze()
         for n, p in self.named_parameters():
             print(n, p.requires_grad)
-        pdb.set_trace()
         return True
 
     def init_cuda(self,):

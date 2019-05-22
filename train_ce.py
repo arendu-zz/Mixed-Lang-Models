@@ -11,7 +11,8 @@ from src.utils.utils import SPECIAL_TOKENS
 from src.utils.utils import TextDataset
 
 from src.models.ce_model import CE_CLOZE
-from src.models.ce_model import TiedEncoderDecoder, CharTiedEncoderDecoder
+from src.models.ce_model import spell2mat
+from src.models.ce_model import TiedEncoderDecoder, CharTiedEncoderDecoder, CGramTiedEncoderDecoder
 from src.models.ce_model import ClozeContextEncoder, ClozeMaskContextEncoder, LMContextEncoder
 from src.models.model_untils import make_context_encoder
 
@@ -65,10 +66,10 @@ if __name__ == '__main__':
     opt.add_argument('--dev_corpus', action='store', dest='dev_corpus', required=False, default=None)
     opt.add_argument('--v2i', action='store', dest='v2i', required=True,
                      help='vocab to index pickle obj')
-    opt.add_argument('--v2spell', action='store', dest='v2spell', required=True,
+    opt.add_argument('--v2cgramspell', action='store', dest='v2cgramspell', required=True,
                      help='vocab to spelling pickle obj')
-    opt.add_argument('--c2i', action='store', dest='c2i', required=True,
-                     help='character (corpus and gloss)  to index pickle obj')
+    opt.add_argument('--cgram2i', action='store', dest='cgram2i', required=True,
+                     help='character to index pickle obj comma sepeated list of files')
     opt.add_argument('--embedding_size', action='store', type=int,
                      dest='embedding_size', default=100)
     opt.add_argument('--embedding_pretrain', action='store', type=int,
@@ -90,11 +91,14 @@ if __name__ == '__main__':
                      choices=['cloze', 'cloze_mask', 'lm'], required=True)
     opt.add_argument('--checkpoint_freq', action='store', required=True,
                      dest='checkpoint_freq', type=int, default=10)
-    opt.add_argument('--char_aware', action='store', required=False, choices=[0, 1],
+    opt.add_argument('--char_aware', action='store', required=False, choices=[0, 1, 2],
                      dest='char_aware', type=int, default=0)
-    opt.add_argument('--pool_type', action='store', choices=['None', 'RNN', 'CNNAvg', 'CNNMax', 'CNNLP'],
+    opt.add_argument('--pool_type', action='store',
+                     choices=['None', 'RNN', 'CNNAvg', 'CNNMax', 'CNNLP', '0-4', '1-4', '2-4', '3-4', '4-4'],
                      dest='pool_type', type=str)
     opt.add_argument('--lang_bit_ratio', action='store', dest='lang_bit_ratio', type=float)
+    opt.add_argument('--learn_main_embs', action='store', dest='learn_main_embs',
+                     type=int, choices=[0, 1], required=True)
     opt.add_argument('--vmat', action='store', dest='vmat', required=True,
                      help='l1 word embeddings')
     options = opt.parse_args()
@@ -119,8 +123,22 @@ if __name__ == '__main__':
     i2v = {v: k for k, v in v2i.items()}
     assert len(v2i) == len(i2v)
 
-    c2i = pickle.load(open(options.c2i, 'rb'))
-    i2c = {v: k for k, v in c2i.items()}
+    #load cgrams
+    cgram_files = options.cgram2i.split(',')
+    cgram2i_list = []
+    i2cgram_list = []
+    for cgram_file in cgram_files:
+        cngram2i = pickle.load(open(cgram_file, 'rb'))
+        i2cngram = {v: k for k, v in cngram2i.items()}
+        cgram2i_list.append(cngram2i)
+        i2cgram_list.append(i2cngram)
+    v2cgramspell_files = options.v2cgramspell.split(',')
+    cgram_spelling_mat_list = []
+    for v2cgramspell_file in v2cgramspell_files:
+        f = pickle.load(open(v2cgramspell_file, 'rb'))
+        m = spell2mat(f)
+        assert vocab_size == m.shape[0]
+        cgram_spelling_mat_list.append(m)
 
     if options.embedding_pretrain == 1:
         vmat = torch.load(options.vmat)
@@ -128,22 +146,35 @@ if __name__ == '__main__':
         vmat = None
 
     if options.char_aware == 1:
-        assert options.v2spell is not None
-        v2spell = pickle.load(open(options.v2spell, 'rb'))
-        spelling_mat = torch.Tensor(len(v2spell), len(v2spell[0])).fill_(0).long()
-        for k, v in v2spell.items():
-            spelling_mat[k] = torch.tensor(v)
-        spelling_mat = spelling_mat[:, :-1] # throw away length of spelling because we going to use cnns
-        assert vocab_size == spelling_mat.shape[0]
-        tied_encoder_decoder = CharTiedEncoderDecoder(char_vocab_size=len(c2i),
+        tied_encoder_decoder = CharTiedEncoderDecoder(char_vocab_size=len(cgram2i_list[0]),
                                                       char_embedding_size=options.embedding_size,
                                                       word_vocab_size=vocab_size,
                                                       word_embedding_size=options.embedding_size,
-                                                      spelling_mat=spelling_mat,
+                                                      spelling_mat=cgram_spelling_mat_list[0],
                                                       mode='l1',
                                                       pool=options.pool_type,
                                                       num_lang_bits=int(options.embedding_size * options.lang_bit_ratio))
         tied_encoder_decoder.param_type = 'l1'
+    elif options.char_aware == 2:
+        l1_cgram_vocab_sizes = [len(i) for i in cgram2i_list]
+        l1_cgram_spelling_mats = cgram_spelling_mat_list
+        min_cgram = int(options.pool_type.split('-')[0])
+        max_cgram = int(options.pool_type.split('-')[1])
+        l1_cgram_vocab_sizes = l1_cgram_vocab_sizes[min_cgram:max_cgram]
+        l1_cgram_spelling_mats = l1_cgram_spelling_mats[min_cgram:max_cgram]
+        tied_encoder_decoder = CGramTiedEncoderDecoder(l1_cgram_vocab_sizes=l1_cgram_vocab_sizes,
+                                                       l1_cgram_spelling_mats=l1_cgram_spelling_mats,
+                                                       l1_word_vocab_size=vocab_size,
+                                                       l2_cgram_vocab_sizes=[],
+                                                       l2_cgram_spelling_mats=[],
+                                                       l2_cgram_by_l1_spelling_mats=[],
+                                                       l2_word_vocab_size=None,
+                                                       word_embedding_size=options.embedding_size,
+                                                       mode='l1',
+                                                       min_cgram=min_cgram,
+                                                       max_cgram=max_cgram,
+                                                       param_type='l1',
+                                                       learn_main_l1_embs=options.learn_main_embs == 1)
     else:
         tied_encoder_decoder = TiedEncoderDecoder(vocab_size=vocab_size,
                                                   embedding_size=options.embedding_size,

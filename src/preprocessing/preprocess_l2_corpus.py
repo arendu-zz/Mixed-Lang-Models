@@ -9,7 +9,7 @@ from src.utils.utils import SPECIAL_TOKENS
 
 import editdistance as ed
 import math
-
+import pdb
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -35,16 +35,18 @@ class Preprocess(object):
                               SPECIAL_TOKENS.EOS,
                               SPECIAL_TOKENS.UNK])
 
-
     def build(self, l1_data_dir, l2_data_dir, l2_save_dir, ft_model, max_word_len):
-        l1_vocab = pickle.load(open(os.path.join(l1_data_dir, 'l1.vocab.pkl'), 'rb'))
+        #l1_vocab = pickle.load(open(os.path.join(l1_data_dir, 'l1.vocab.pkl'), 'rb'))
         l1_idx2v = pickle.load(open(os.path.join(l1_data_dir, 'l1.idx2v.pkl'), 'rb'))
         l1_v2idx = pickle.load(open(os.path.join(l1_data_dir, 'l1.v2idx.pkl'), 'rb'))
         l1_mat = torch.load(l1_data_dir + '/l1.mat.pt')
-        l1_vidx2spelling = pickle.load(open(os.path.join(l1_data_dir, 'l1.vidx2spelling.pkl'), 'rb'))
+        #l1_vidx2c1gram_spelling = pickle.load(open(os.path.join(l1_data_dir, 'l1.vidx2c1gram_spelling.pkl'), 'rb'))
         #l1_vidx2unigram_prob = pickle.load(open(os.path.join(l1_data_dir, 'l1.vidx2unigram_prob.pkl'), 'rb'))
-        l1_idx2c = pickle.load(open(os.path.join(l1_data_dir, 'l1.idx2c.pkl'), 'rb'))
-        l1_c2idx = pickle.load(open(os.path.join(l1_data_dir, 'l1.c2idx.pkl'), 'rb'))
+        #l1_idx2c1gram = pickle.load(open(os.path.join(l1_data_dir, 'l1.idx2c1gram.pkl'), 'rb'))
+        l1_c1gram2idx = pickle.load(open(os.path.join(l1_data_dir, 'l1.c1gram2idx.pkl'), 'rb'))
+        l1_c2gram2idx = pickle.load(open(os.path.join(l1_data_dir, 'l1.c2gram2idx.pkl'), 'rb'))
+        l1_c3gram2idx = pickle.load(open(os.path.join(l1_data_dir, 'l1.c3gram2idx.pkl'), 'rb'))
+        l1_c4gram2idx = pickle.load(open(os.path.join(l1_data_dir, 'l1.c4gram2idx.pkl'), 'rb'))
 
         l2_v2idx = {SPECIAL_TOKENS.PAD: 0, SPECIAL_TOKENS.BOS: 1, SPECIAL_TOKENS.EOS: 2, SPECIAL_TOKENS.UNK: 3}
         l2_idx2v = {0: SPECIAL_TOKENS.PAD, 1: SPECIAL_TOKENS.BOS, 2: SPECIAL_TOKENS.EOS, 3: SPECIAL_TOKENS.UNK}
@@ -81,6 +83,7 @@ class Preprocess(object):
                         full_data_key.add((l1_v2idx[l1_w], l2_v2idx[l2_w]))
                         line_key.add((l1_v2idx[l1_w], l2_v2idx[l2_w]))
                         print(l1_w, l2_w, l1_v2idx[l1_w], l2_v2idx[l2_w])
+                #assert len(line_key) > 0, "this line has issues" + str(line)
                 line_keys.append(list(sorted(line_key)))
         full_data_key = list(sorted(full_data_key))
         assert len(l2_v2idx) == len(l2_idx2v)
@@ -102,36 +105,147 @@ class Preprocess(object):
         l2_key_wt = []
         for l1k, l2k in full_data_key:
             l2_key_wt.append(l2_vidx2idf[l2k])
-        #min_tfidf = 0
-        #max_tfidf = 0
-        #l2_vidx2tfidf = {}
-        #for l2_vidx in l2_vidx2tf:
-        #    l2_vidx2tfidf[l2_vidx] = l2_vidx2tf[l2_vidx] * l2_vidx2idf[l2_vidx]
-        #    min_tfidf = min_tfidf if min_tfidf < l2_vidx2tfidf[l2_vidx] else l2_vidx2tfidf[l2_vidx]
-        #    max_tfidf = max_tfidf if max_tfidf > l2_vidx2tfidf[l2_vidx] else l2_vidx2tfidf[l2_vidx]
-        #for l2_vidx in l2_vidx2tfidf:
-        #    l2_vidx2tfidf[l2_vidx] = (l2_vidx2tfidf[l2_vidx] - min_tfidf) / (max_tfidf - min_tfidf)
-
-        l2_c2idx = {c: i for c, i in l1_c2idx.items()}
-        l2_vidx2spelling = {}  # TODO
+        l2_c1gram2idx = {}
+        l2_c2gram2idx = {}
+        l2_c3gram2idx = {}
+        l2_c4gram2idx = {}
+        #l2_c1gram2idx = {c: i for c, i in l1_c1gram2idx.items()}
+        #l2_c2gram2idx = {c: i for c, i in l1_c2gram2idx.items()}
+        #l2_c3gram2idx = {c: i for c, i in l1_c3gram2idx.items()}
+        #l2_c4gram2idx = {c: i for c, i in l1_c4gram2idx.items()}
+        max_vl1 = 0
+        max_vl2 = 0
+        max_vl3 = 0
+        max_vl4 = 0
+        vocab_info = []
+        max_vl1_by_l1 = 0
+        max_vl2_by_l1 = 0
+        max_vl3_by_l1 = 0
+        max_vl4_by_l1 = 0
+        vocab_info_by_l1 = []
         for l2_v, l2_idx in l2_v2idx.items():
             print('spelling', l2_v, l2_idx)
-            if l2_v not in [SPECIAL_TOKENS.PAD, SPECIAL_TOKENS.NULL, SPECIAL_TOKENS.BOS, SPECIAL_TOKENS.EOS]:
-                l2_chars = [SPECIAL_TOKENS.BOW] + [c for c in l2_v] + [SPECIAL_TOKENS.EOW]
+            if l2_v not in [SPECIAL_TOKENS.PAD, SPECIAL_TOKENS.NULL, SPECIAL_TOKENS.BOS, SPECIAL_TOKENS.EOS, SPECIAL_TOKENS.UNK]:
+                l2_c1grams = [SPECIAL_TOKENS.BOW] + [c for c in l2_v] + [SPECIAL_TOKENS.EOW]
+                l2_c2grams = [''.join(z) for z in zip(*[l2_c1grams[i:] for i in range(2)])]
+                l2_c3grams = [''.join(z) for z in zip(*[l2_c1grams[i:] for i in range(3)])]
+                l2_c4grams = [''.join(z) for z in zip(*[l2_c1grams[i:] for i in range(4)])]
             else:
-                l2_chars = [SPECIAL_TOKENS.BOW] + [l2_v] + [SPECIAL_TOKENS.EOW]
-            l2_chars = l2_chars[:max_word_len]
-            l2_chars_len = len(l2_chars)
-            for l2c in l2_chars:
-                l2_c2idx[l2c] = l2_c2idx.get(l2c, len(l2_c2idx))
-            l2_chars = l2_chars + ([SPECIAL_TOKENS.PAD] * (max_word_len - l2_chars_len))
-            l2_chars_idx = [l2_c2idx[l2c] for l2c in l2_chars]
-            l2_chars_idx[-1] = l2_chars_len
-            l2_vidx2spelling[l2_idx] = l2_chars_idx
-        l2_idx2c = {i: c for c, i in l2_c2idx.items()}
-        pickle.dump(l2_c2idx, open(os.path.join(l2_save_dir, 'l2.c2idx.pkl'), 'wb'))
+                l2_c1grams = [l2_v]
+                l2_c2grams = [l2_v]
+                l2_c3grams = [l2_v]
+                l2_c4grams = [l2_v]
+
+            c1_len = len(l2_c1grams)
+            for l2c in l2_c1grams:
+                l2_c1gram2idx[l2c] = l2_c1gram2idx.get(l2c, len(l2_c1gram2idx))
+            cs1 = [l2_c1gram2idx[c] for c in l2_c1grams]
+            max_vl1 = max_vl1 if c1_len < max_vl1 else c1_len
+
+            cs1_by_l1 = [l1_c1gram2idx.get(c, l1_c1gram2idx[SPECIAL_TOKENS.PAD]) for c in l2_c1grams]
+            max_vl1_by_l1 = max_vl1_by_l1 if c1_len < max_vl1_by_l1 else c1_len
+
+            c2_len = len(l2_c2grams)
+            for l2c in l2_c2grams:
+                l2_c2gram2idx[l2c] = l2_c2gram2idx.get(l2c, len(l2_c2gram2idx))
+            cs2 = [l2_c2gram2idx[c] for c in l2_c2grams]
+            max_vl2 = max_vl2 if c2_len < max_vl2 else c2_len
+
+            cs2_by_l1 = [l1_c2gram2idx.get(c, l1_c2gram2idx[SPECIAL_TOKENS.PAD]) for c in l2_c2grams]
+            max_vl2_by_l1 = max_vl2_by_l1 if c2_len < max_vl2_by_l1 else c2_len
+
+            c3_len = len(l2_c3grams)
+            for l2c in l2_c3grams:
+                l2_c3gram2idx[l2c] = l2_c3gram2idx.get(l2c, len(l2_c3gram2idx))
+            cs3 = [l2_c3gram2idx[c] for c in l2_c3grams]
+            max_vl3 = max_vl3 if c3_len < max_vl3 else c3_len
+
+            cs3_by_l1 = [l1_c3gram2idx.get(c, l1_c3gram2idx[SPECIAL_TOKENS.PAD]) for c in l2_c3grams]
+            max_vl3_by_l1 = max_vl3_by_l1 if c3_len < max_vl3_by_l1 else c3_len
+
+            c4_len = len(l2_c4grams)
+            for l2c in l2_c4grams:
+                l2_c4gram2idx[l2c] = l2_c4gram2idx.get(l2c, len(l2_c4gram2idx))
+            cs4 = [l2_c4gram2idx[c] for c in l2_c4grams]
+            max_vl4 = max_vl4 if c4_len < max_vl4 else c4_len
+
+            cs4_by_l1 = [l1_c4gram2idx.get(c, l1_c4gram2idx[SPECIAL_TOKENS.PAD]) for c in l2_c4grams]
+            max_vl4_by_l1 = max_vl4_by_l1 if c4_len < max_vl4_by_l1 else c4_len
+
+            vocab_info.append((l2_idx, l2_v, c1_len, cs1, c2_len, cs2, c3_len, cs3, c4_len, cs4))
+            vocab_info_by_l1.append((l2_idx, l2_v, c1_len, cs1_by_l1, c2_len, cs2_by_l1, c3_len, cs3_by_l1, c4_len, cs4_by_l1))
+
+        l2_vidx2c1gram_spelling = {}
+        l2_vidx2c2gram_spelling = {}
+        l2_vidx2c3gram_spelling = {}
+        l2_vidx2c4gram_spelling = {}
+        for l2_idx, l2v, c1l, cs1, c2l, cs2, c3l, cs3, c4l, cs4 in vocab_info:
+            #cs1 = l2_c1grams[:max_word_len]
+            padder1 = [0] * (max_vl1 - c1l)
+            l2_vidx2c1gram_spelling[l2_idx] = cs1 + padder1 + [c1l]
+
+            padder2 = [0] * (max_vl2 - c2l)
+            l2_vidx2c2gram_spelling[l2_idx] = cs2 + padder2 + [c2l]
+
+            padder3 = [0] * (max_vl3 - c3l)
+            l2_vidx2c3gram_spelling[l2_idx] = cs3 + padder3 + [c3l]
+
+            padder4 = [0] * (max_vl4 - c4l)
+            l2_vidx2c4gram_spelling[l2_idx] = cs4 + padder4 + [c4l]
+
+        pickle.dump(l2_vidx2c1gram_spelling, open(os.path.join(l2_save_dir, 'l2.vidx2c1gram_spelling.pkl'), 'wb'))
+        pickle.dump(l2_vidx2c2gram_spelling, open(os.path.join(l2_save_dir, 'l2.vidx2c2gram_spelling.pkl'), 'wb'))
+        pickle.dump(l2_vidx2c3gram_spelling, open(os.path.join(l2_save_dir, 'l2.vidx2c3gram_spelling.pkl'), 'wb'))
+        pickle.dump(l2_vidx2c4gram_spelling, open(os.path.join(l2_save_dir, 'l2.vidx2c4gram_spelling.pkl'), 'wb'))
+
+        l2_vidx2c1gram_by_l1_spelling = {}
+        l2_vidx2c2gram_by_l1_spelling = {}
+        l2_vidx2c3gram_by_l1_spelling = {}
+        l2_vidx2c4gram_by_l1_spelling = {}
+        for l2_idx, l2v, c1l, cs1_by_l1, c2l, cs2_by_l1, c3l, cs3_by_l1, c4l, cs4_by_l1 in vocab_info_by_l1:
+            #cs1 = l2_c1grams[:max_word_len]
+            padder1 = [0] * (max_vl1_by_l1 - c1l)
+            l2_vidx2c1gram_by_l1_spelling[l2_idx] = cs1_by_l1 + padder1 + [c1l]
+
+            padder2 = [0] * (max_vl2_by_l1 - c2l)
+            l2_vidx2c2gram_by_l1_spelling[l2_idx] = cs2_by_l1 + padder2 + [c2l]
+
+            padder3 = [0] * (max_vl3_by_l1 - c3l)
+            l2_vidx2c3gram_by_l1_spelling[l2_idx] = cs3_by_l1 + padder3 + [c3l]
+
+            padder4 = [0] * (max_vl4_by_l1 - c4l)
+            l2_vidx2c4gram_by_l1_spelling[l2_idx] = cs4_by_l1 + padder4 + [c4l]
+
+        pickle.dump(l2_vidx2c1gram_by_l1_spelling, open(os.path.join(l2_save_dir, 'l2.vidx2c1gram_by_l1_spelling.pkl'), 'wb'))
+        pickle.dump(l2_vidx2c2gram_by_l1_spelling, open(os.path.join(l2_save_dir, 'l2.vidx2c2gram_by_l1_spelling.pkl'), 'wb'))
+        pickle.dump(l2_vidx2c3gram_by_l1_spelling, open(os.path.join(l2_save_dir, 'l2.vidx2c3gram_by_l1_spelling.pkl'), 'wb'))
+        pickle.dump(l2_vidx2c4gram_by_l1_spelling, open(os.path.join(l2_save_dir, 'l2.vidx2c4gram_by_l1_spelling.pkl'), 'wb'))
+
+        l2_idx2c = {i: c for c, i in l2_c1gram2idx.items()}
+        pickle.dump(l2_c1gram2idx, open(os.path.join(l2_save_dir, 'l2.c2idx.pkl'), 'wb'))
         pickle.dump(l2_idx2c, open(os.path.join(l2_save_dir, 'l2.idx2c.pkl'), 'wb'))
-        pickle.dump(l2_vidx2spelling, open(os.path.join(l2_save_dir, 'l2.vidx2spelling.pkl'), 'wb'))
+        l2_idx2c1gram = {i: c for c, i in l2_c1gram2idx.items()}
+        l2_idx2c2gram = {i: c for c, i in l2_c2gram2idx.items()}
+        l2_idx2c3gram = {i: c for c, i in l2_c3gram2idx.items()}
+        l2_idx2c4gram = {i: c for c, i in l2_c4gram2idx.items()}
+
+        print('l2 char vocab size', len(l2_c1gram2idx), len(l2_idx2c1gram))
+        assert len(l2_idx2c1gram) == len(l2_c1gram2idx)
+        pickle.dump(l2_idx2c1gram, open(os.path.join(l2_save_dir, 'l2.idx2c1gram.pkl'), 'wb'))
+        pickle.dump(l2_c1gram2idx, open(os.path.join(l2_save_dir, 'l2.c1gram2idx.pkl'), 'wb'))
+        print('l2 char2 vocab size', len(l2_c2gram2idx), len(l2_idx2c2gram))
+        assert len(l2_idx2c2gram) == len(l2_c2gram2idx)
+        pickle.dump(l2_idx2c2gram, open(os.path.join(l2_save_dir, 'l2.idx2c2gram.pkl'), 'wb'))
+        pickle.dump(l2_c2gram2idx, open(os.path.join(l2_save_dir, 'l2.c2gram2idx.pkl'), 'wb'))
+        print('l2 char3 vocab size', len(l2_c3gram2idx), len(l2_idx2c3gram))
+        assert len(l2_idx2c3gram) == len(l2_c3gram2idx)
+        pickle.dump(l2_idx2c3gram, open(os.path.join(l2_save_dir, 'l2.idx2c3gram.pkl'), 'wb'))
+        pickle.dump(l2_c3gram2idx, open(os.path.join(l2_save_dir, 'l2.c3gram2idx.pkl'), 'wb'))
+        print('l2 char4 vocab size', len(l2_c4gram2idx), len(l2_idx2c4gram))
+        assert len(l2_idx2c4gram) == len(l2_c4gram2idx)
+        pickle.dump(l2_idx2c4gram, open(os.path.join(l2_save_dir, 'l2.idx2c4gram.pkl'), 'wb'))
+        pickle.dump(l2_c4gram2idx, open(os.path.join(l2_save_dir, 'l2.c4gram2idx.pkl'), 'wb'))
+
         if ft_model is not None:
             mat = torch.FloatTensor(len(l2_idx2v), 300).uniform_(-1.0, 1.0)
             for i, v in l2_idx2v.items():
